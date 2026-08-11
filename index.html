@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#ede6d7">
-  <title>FUDE — 毛筆</title>
+  <title>FUDE — 物理毛筆</title>
   <style>
     :root { background: #ede6d7; color: #252019; }
     * { box-sizing: border-box; }
@@ -18,7 +18,7 @@
   </style>
 </head>
 <body>
-  <canvas id="paper" aria-label="毛筆で描くキャンバス"></canvas>
+  <canvas id="paper" aria-label="物理シミュレーション毛筆キャンバス"></canvas>
   <div id="notice">筆先を置いてください</div>
   <div id="rotate">縦向きにしてから<br>毛筆をお使いください</div>
   <script>
@@ -28,180 +28,205 @@
     const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     const notice = document.querySelector('#notice');
     const HAIR_COUNT = 2000;
-    const ink = '#171310';
-    let dpr = 1, active = null, clearTimer = 0, messageTimer = 0;
+    const NODES = 5;                 // 根元 + 4節。各節を3Dで計算する。
+    const PARTICLES = HAIR_COUNT * NODES;
+    const PAPER_Z = 0;
+    const ink = '#100c09';
+    let dpr = 1, activePointer = null, clearTimer = 0, messageTimer = 0;
 
-    // A fixed, tapered bundle: center hairs are longest; perimeter hairs are short.
+    // Position and previous-position pairs form a Verlet 3D particle system.
+    const px = new Float32Array(PARTICLES), py = new Float32Array(PARTICLES), pz = new Float32Array(PARTICLES);
+    const ox = new Float32Array(PARTICLES), oy = new Float32Array(PARTICLES), oz = new Float32Array(PARTICLES);
+    const lastInkX = new Float32Array(HAIR_COUNT), lastInkY = new Float32Array(HAIR_COUNT);
+    const wasWet = new Uint8Array(HAIR_COUNT);
     const hairs = Array.from({ length: HAIR_COUNT }, (_, i) => {
-      const a = i * 2.399963229728653; // golden angle: evenly fills the circular root
-      const r = Math.sqrt((i + .5) / HAIR_COUNT);
-      const edge = Math.pow(r, 1.7);
-      // 微妙な長短と強さの違いが、含み墨を持った濡れた毛先の輪郭を作る。
-      const variation = .93 + (((Math.sin(i * 78.233) * 43758.5453) % 1 + 1) % 1) * .14;
+      const angle = i * 2.399963229728653;
+      const radius = Math.sqrt((i + .5) / HAIR_COUNT);
+      const variation = .94 + (((Math.sin(i * 78.233) * 43758.5453) % 1 + 1) % 1) * .12;
+      const center = Math.pow(1 - radius, .66);
       return {
-        x: Math.cos(a) * r,
-        y: Math.sin(a) * r,
-        length: (.42 + .58 * Math.pow(1 - r, .68)) * variation,
-        stiffness: .28 + .72 * Math.pow(1 - r, .45),
-        grain: variation
+        rootX: Math.cos(angle) * radius * 10,
+        rootY: Math.sin(angle) * radius * 10,
+        splayX: Math.cos(angle), splayY: Math.sin(angle),
+        // A pointed brush: long compliant central hairs, short firmer outside hairs.
+        length: (44 + 74 * center) * variation,
+        segment: (44 + 74 * center) * variation / (NODES - 1),
+        damping: .80 + .11 * center,
+        slip: .045 + .16 * center
       };
     });
+    const brush = { active: false, x: 0, y: 0, pressure: 0, rootZ: 112, minSize: 0 };
 
     function fit() {
       dpr = Math.min(devicePixelRatio || 1, 2);
-      canvas.width = Math.round(innerWidth * dpr);
-      canvas.height = Math.round(innerHeight * dpr);
+      canvas.width = Math.round(innerWidth * dpr); canvas.height = Math.round(innerHeight * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = '#f4eddf';
-      ctx.fillRect(0, 0, innerWidth, innerHeight);
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
+      ctx.fillStyle = '#f4eddf'; ctx.fillRect(0, 0, innerWidth, innerHeight);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     }
     fit();
     addEventListener('resize', fit, { passive: true });
 
     function say(text, time = 1800) {
-      notice.textContent = text;
-      notice.classList.remove('hide');
-      clearTimeout(messageTimer);
-      messageTimer = setTimeout(() => notice.classList.add('hide'), time);
+      notice.textContent = text; notice.classList.remove('hide');
+      clearTimeout(messageTimer); messageTimer = setTimeout(() => notice.classList.add('hide'), time);
     }
-
-    // width / height exist for PointerEvents, but a 1px point is not a physical brush contact.
-    // This deliberately makes mouse input inert; mobile drawing starts only with usable contact geometry.
+    function clearPaper() { ctx.fillStyle = '#f4eddf'; ctx.fillRect(0, 0, innerWidth, innerHeight); say('紙を新しくしました'); }
     function contactSize(e) {
       const w = Number(e.width), h = Number(e.height);
       if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 1.25 || h <= 1.25) return null;
       return Math.sqrt(w * h);
     }
-    function isClearCorner(e) { return e.clientX >= innerWidth - 37.8 && e.clientY <= 37.8; } // 1cm CSS
+    function isClearCorner(e) { return e.clientX >= innerWidth - 37.8 && e.clientY <= 37.8; }
     function cancelClear() { if (clearTimer) { clearTimeout(clearTimer); clearTimer = 0; } }
-    function clearPaper() {
-      ctx.fillStyle = '#f4eddf'; ctx.fillRect(0, 0, innerWidth, innerHeight);
-      say('紙を新しくしました');
+
+    // width and height are the sole input to virtual brush height / pressure.
+    function pressureFromContact(size) {
+      brush.minSize = Math.min(brush.minSize, size);
+      const absolute = Math.max(0, Math.min(1, (size - 2) / 42));
+      const relative = Math.max(0, Math.min(1, (size - brush.minSize) / Math.max(1.1, brush.minSize * .10)));
+      return Math.max(.025, Math.pow(Math.max(absolute, relative), .62));
     }
+    function rootPosition(hair, x, y, z) { return { x: x + hair.rootX, y: y + hair.rootY, z }; }
 
-    function makeSample(e, size, previous) {
-      const x = e.clientX, y = e.clientY;
-      const dx = previous ? x - previous.x : 0;
-      const dy = previous ? y - previous.y : 0;
-      const speed = Math.hypot(dx, dy);
-      const ux = speed > .15 ? dx / speed : (previous?.ux ?? 1);
-      const uy = speed > .15 ? dy / speed : (previous?.uy ?? 0);
-      return { x, y, size, ux, uy, speed };
-    }
-
-    function bristleTip(sample, hair, depression, state) {
-      // Root fans out under compression.  The local y axis rotates with the stroke direction.
-      const sideX = -sample.uy, sideY = sample.ux;
-      // The footprint is not a circular stamp.  Compression keeps the requested
-      // 1.5x width, but extends much farther along travel.  The leading half is
-      // narrowed, creating the pointed, raindrop-shaped brush footprint.
-      const sideSpread = 5.25 + 42 * depression;
-      const travelSpread = 7 + 70 * depression;
-      const lead = Math.max(0, Math.min(1, (hair.y + 1) * .5));
-      const leadTaper = .42 + .58 * (1 - lead);
-      const radialLength = .22 + .78 * hair.length;
-      const rootSide = hair.x * sideSpread * radialLength * leadTaper;
-      const rootTravel = hair.y * travelSpread * radialLength;
-      const rx = sideX * rootSide + sample.ux * rootTravel;
-      const ry = sideY * rootSide + sample.uy * rootTravel;
-
-      // The pressed shaft bends backward (opposite travel); long central hairs bend farther.
-      // A tiny radial term makes individual hairs peel away in three dimensions, not as a flat stamp.
-      const bend = depression * (12 + 52 * hair.length) * (1.18 - .55 * hair.stiffness);
-      const liftProjection = depression * hair.length * 8;
-      const peel = (1 - depression) * 2.5 + hair.x * liftProjection;
-      return {
-        // state.escape is a delayed force vector.  At a corner it retains the
-        // previous bend for a moment, so the hair tip naturally takes a small arc.
-        x: sample.x + rx + state.escapeX * bend + sideX * peel,
-        y: sample.y + ry + state.escapeY * bend + sideY * peel
-      };
-    }
-
-    function drawSegment(before, after, state) {
-      state.minSize = Math.min(state.minSize, after.size);
-      // The pressure coefficient uses only event.width / event.height.  It combines
-      // their absolute contact area with change from the lightest touch in this stroke.
-      // Do not saturate at ordinary finger-contact sizes.  These ranges make a
-      // 5px light touch, 20px normal touch, and 40px hard press visibly distinct.
-      const absolute = Math.max(0, Math.min(1, (after.size - 2) / 42));
-      const relative = Math.max(0, Math.min(1, (after.size - state.minSize) / Math.max(1.1, state.minSize * .10)));
-      const depression = Math.max(.025, Math.pow(Math.max(absolute, relative), .62));
-      const distance = Math.max(1, Math.hypot(after.x - before.x, after.y - before.y));
-      const repeats = Math.min(4, Math.max(1, Math.ceil(distance / 5)));
-      for (let step = 1; step <= repeats; step++) {
-        const t = step / repeats;
-        const oldT = (step - 1) / repeats;
-        const a = { x: before.x + (after.x - before.x) * oldT, y: before.y + (after.y - before.y) * oldT, size: before.size + (after.size - before.size) * oldT, ux: after.ux, uy: after.uy };
-        const b = { x: before.x + (after.x - before.x) * t, y: before.y + (after.y - before.y) * t, size: before.size + (after.size - before.size) * t, ux: after.ux, uy: after.uy };
-        // A compressed brush bends more and returns more slowly: this is the
-        // source of the characteristic "go around the corner" behaviour.
-        const follow = .42 - depression * .24;
-        state.escapeX += (-b.ux - state.escapeX) * follow;
-        state.escapeY += (-b.uy - state.escapeY) * follow;
-        ctx.beginPath();
-        for (const hair of hairs) {
-          const p = bristleTip(a, hair, depression, state);
-          const q = bristleTip(b, hair, depression, state);
-          ctx.moveTo(p.x, p.y);
-          ctx.lineTo(q.x, q.y);
+    function resetBristles() {
+      // On placement, compression splays fibres radially. Movement thereafter is
+      // not faked: paper friction and the moving root determine bend direction.
+      for (let h = 0; h < HAIR_COUNT; h++) {
+        const hair = hairs[h], root = rootPosition(hair, brush.x, brush.y, brush.rootZ), start = h * NODES;
+        for (let n = 0; n < NODES; n++) {
+          const t = n / (NODES - 1);
+          const naturalZ = root.z - hair.length * t;
+          const compression = Math.max(0, -naturalZ);
+          const j = start + n;
+          px[j] = ox[j] = root.x + hair.splayX * compression * .62 * t;
+          py[j] = oy[j] = root.y + hair.splayY * compression * .62 * t;
+          pz[j] = oz[j] = Math.max(PAPER_Z, naturalZ);
         }
-        ctx.strokeStyle = ink;
-        // Loaded ink: every bristle is fully opaque.  Darkness never changes with pressure.
+        wasWet[h] = 0;
+      }
+    }
+
+    function pinRoots() {
+      for (let h = 0; h < HAIR_COUNT; h++) {
+        const hair = hairs[h], root = rootPosition(hair, brush.x, brush.y, brush.rootZ), j = h * NODES;
+        px[j] = ox[j] = root.x; py[j] = oy[j] = root.y; pz[j] = oz[j] = root.z;
+      }
+    }
+    function integrate() {
+      for (let h = 0; h < HAIR_COUNT; h++) {
+        const hair = hairs[h], start = h * NODES;
+        for (let n = 1; n < NODES; n++) {
+          const j = start + n;
+          const vx = (px[j] - ox[j]) * hair.damping;
+          const vy = (py[j] - oy[j]) * hair.damping;
+          const vz = (pz[j] - oz[j]) * hair.damping - .30; // gravity toward the paper
+          ox[j] = px[j]; oy[j] = py[j]; oz[j] = pz[j];
+          px[j] += vx; py[j] += vy; pz[j] += vz;
+        }
+      }
+    }
+    function solveConstraints() {
+      // Four passes preserve each hair's segment lengths while the root moves.
+      for (let pass = 0; pass < 4; pass++) {
+        pinRoots();
+        for (let h = 0; h < HAIR_COUNT; h++) {
+          const hair = hairs[h], start = h * NODES;
+          for (let n = 0; n < NODES - 1; n++) {
+            const a = start + n, b = a + 1;
+            const dx = px[b] - px[a], dy = py[b] - py[a], dz = pz[b] - pz[a];
+            const distance = Math.hypot(dx, dy, dz) || .0001;
+            const correction = (distance - hair.segment) / distance;
+            if (n === 0) {
+              px[b] -= dx * correction; py[b] -= dy * correction; pz[b] -= dz * correction;
+            } else {
+              px[a] += dx * correction * .5; py[a] += dy * correction * .5; pz[a] += dz * correction * .5;
+              px[b] -= dx * correction * .5; py[b] -= dy * correction * .5; pz[b] -= dz * correction * .5;
+            }
+          }
+        }
+        // Paper collision with high tangential friction is what makes tips trail
+        // behind the moving root instead of imposing an artificial raindrop shape.
+        for (let h = 0; h < HAIR_COUNT; h++) {
+          const hair = hairs[h], start = h * NODES;
+          for (let n = 1; n < NODES; n++) {
+            const j = start + n;
+            if (pz[j] < PAPER_Z) {
+              pz[j] = PAPER_Z;
+              ox[j] = px[j] - (px[j] - ox[j]) * hair.slip;
+              oy[j] = py[j] - (py[j] - oy[j]) * hair.slip;
+              oz[j] = pz[j];
+            }
+          }
+        }
+      }
+    }
+    function depositInk() {
+      ctx.beginPath();
+      let any = false;
+      for (let h = 0; h < HAIR_COUNT; h++) {
+        const tip = h * NODES + NODES - 1;
+        if (pz[tip] <= PAPER_Z + .08) {
+          if (wasWet[h]) {
+            ctx.moveTo(lastInkX[h], lastInkY[h]); ctx.lineTo(px[tip], py[tip]); any = true;
+          }
+          lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 1;
+        } else {
+          wasWet[h] = 0;
+        }
+      }
+      if (any) {
+        // Fully loaded, wet black ink: density is not tied to pressure.
         ctx.globalAlpha = 1;
-        ctx.lineWidth = .38 + depression * .63;
+        ctx.strokeStyle = ink;
+        ctx.lineWidth = .62;
         ctx.stroke();
       }
-      ctx.globalAlpha = 1;
     }
+    function simulate() {
+      // Two substeps retain bend history even when PointerEvents arrive sparsely.
+      for (let step = 0; step < 2; step++) { integrate(); solveConstraints(); depositInk(); }
+    }
+    function frame() {
+      if (brush.active) simulate();
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
 
     canvas.addEventListener('pointerdown', e => {
       if (matchMedia('(orientation: landscape)').matches) return;
       if (isClearCorner(e)) {
-        clearTimer = setTimeout(() => {
-          clearTimer = 0;
-          if (confirm('紙をすべて消しますか？')) clearPaper();
-        }, 700);
+        clearTimer = setTimeout(() => { clearTimer = 0; if (confirm('紙をすべて消しますか？')) clearPaper(); }, 700);
         return;
       }
       const size = contactSize(e);
       if (size === null || (e.pointerType !== 'touch' && e.pointerType !== 'pen')) {
-        say('接触面の幅・高さを取得できる端末でお使いください', 2600);
-        return;
+        say('接触面の幅・高さを取得できる端末でお使いください', 2600); return;
       }
       canvas.setPointerCapture(e.pointerId);
-      const now = makeSample(e, size, null);
-      active = {
-        id: e.pointerId,
-        minSize: size,
-        // At rest, all hairs initially lean backwards from the first movement.
-        escapeX: -now.ux,
-        escapeY: -now.uy,
-        last: now
-      };
-      say('筆を運んでください', 850);
+      activePointer = e.pointerId;
+      brush.x = e.clientX; brush.y = e.clientY; brush.minSize = size;
+      brush.pressure = pressureFromContact(size);
+      brush.rootZ = 116 - brush.pressure * 89;
+      brush.active = true; resetBristles();
+      say('毛の物理計算で描画中', 1050);
       e.preventDefault();
     }, { passive: false });
-
     canvas.addEventListener('pointermove', e => {
       if (clearTimer) { if (!isClearCorner(e)) cancelClear(); return; }
-      if (!active || active.id !== e.pointerId) return;
-      const size = contactSize(e);
-      if (size === null) return;
-      const now = makeSample(e, size, active.last);
-      drawSegment(active.last, now, active);
-      active.last = now;
+      if (!brush.active || activePointer !== e.pointerId) return;
+      const size = contactSize(e); if (size === null) return;
+      brush.x = e.clientX; brush.y = e.clientY;
+      brush.pressure = pressureFromContact(size);
+      brush.rootZ = 116 - brush.pressure * 89;
       e.preventDefault();
     }, { passive: false });
-
-    function finish(e) {
+    function endPointer(e) {
       cancelClear();
-      if (active?.id === e.pointerId) active = null;
+      if (activePointer === e.pointerId) { brush.active = false; activePointer = null; }
     }
-    canvas.addEventListener('pointerup', finish);
-    canvas.addEventListener('pointercancel', finish);
+    canvas.addEventListener('pointerup', endPointer);
+    canvas.addEventListener('pointercancel', endPointer);
     canvas.addEventListener('contextmenu', e => e.preventDefault());
   })();
   </script>
