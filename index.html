@@ -201,21 +201,23 @@
       }
     }
     function stampInitialContact() {
-      // Ink is transferred by the tips that actually reach the paper at rest.
-      // This gives a solid central dot on a light tap, before any directional
-      // force has bent the bundle.
-      ctx.beginPath();
-      let any = false;
+      // At rest, wet ink from adjacent contacting tips immediately joins together.
+      // Treat that connected contact patch as one pool, rather than 500 separate
+      // dots; otherwise the spaced roots visibly make a firework-like halo.
+      let contactCount = 0, furthest = 0;
       for (let h = 0; h < HAIR_COUNT; h++) {
         const tip = h * NODES + NODES - 1;
         if (pz[tip] <= PAPER_Z + .08) {
-          ctx.moveTo(px[tip] + .62, py[tip]);
-          ctx.arc(px[tip], py[tip], .62, 0, Math.PI * 2);
-          lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 1;
-          any = true;
+          furthest = Math.max(furthest, Math.hypot(px[tip] - brush.x, py[tip] - brush.y));
+          lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 0;
+          contactCount++;
         }
       }
-      if (any) { ctx.fillStyle = ink; ctx.globalAlpha = 1; ctx.fill(); }
+      if (contactCount) {
+        const pooledRadius = Math.max(.85, Math.min(ROOT_RADIUS * .65, furthest * .80 + .8));
+        ctx.beginPath(); ctx.arc(brush.x, brush.y, pooledRadius, 0, Math.PI * 2);
+        ctx.fillStyle = ink; ctx.globalAlpha = 1; ctx.fill();
+      }
     }
     function simulate() {
       // Two substeps retain bend history even when PointerEvents arrive sparsely.
