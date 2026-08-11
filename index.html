@@ -46,10 +46,8 @@
       // Only the central fibres are longest; length decreases smoothly to the rim.
       const center = Math.pow(1 - radius, .72);
       return {
-        radius,
         rootX: Math.cos(angle) * radius * 10,
         rootY: Math.sin(angle) * radius * 10,
-        splayX: Math.cos(angle), splayY: Math.sin(angle),
         // A pointed brush: long compliant central hairs, short firmer outside hairs.
         length: 42 + 76 * center,
         segment: (42 + 76 * center) / (NODES - 1),
@@ -103,21 +101,20 @@
     function rootPosition(hair, x, y, z) { return { x: x + hair.rootX, y: y + hair.rootY, z }; }
 
     function resetBristles() {
-      // On placement, compression splays fibres radially. Movement thereafter is
-      // not faked: paper friction and the moving root determine bend direction.
+      // On placement fibres are vertical.  Movement thereafter is not faked:
+      // paper friction and the moving root determine bend direction.
       for (let h = 0; h < HAIR_COUNT; h++) {
         const hair = hairs[h], root = rootPosition(hair, brush.x, brush.y, brush.rootZ), start = h * NODES;
         for (let n = 0; n < NODES; n++) {
           const t = n / (NODES - 1);
           const naturalZ = root.z - hair.length * t;
-          const compression = Math.max(0, -naturalZ);
           const j = start + n;
-          // Central long hairs stay near the centre.  Peripheral shorter hairs
-          // gradually fan out under strong compression, filling a solid round tip
-          // instead of producing a hollow ring.
-          const initialBend = compression * (.07 + hair.radius * .36) * Math.pow(t, 1.35);
-          px[j] = ox[j] = root.x + hair.splayX * initialBend;
-          py[j] = oy[j] = root.y + hair.splayY * initialBend;
+          // A stationary press must not arbitrarily choose a radial escape route.
+          // Fibres begin vertically beneath their own roots.  Only a later handle
+          // movement supplies a horizontal force, so the ensuing bend has the
+          // physically correct, opposite-to-travel direction rather than a ring.
+          px[j] = ox[j] = root.x;
+          py[j] = oy[j] = root.y;
           pz[j] = oz[j] = Math.max(PAPER_Z, naturalZ);
         }
         wasWet[h] = 0;
@@ -200,6 +197,23 @@
         ctx.stroke();
       }
     }
+    function stampInitialContact() {
+      // Ink is transferred by the tips that actually reach the paper at rest.
+      // This gives a solid central dot on a light tap, before any directional
+      // force has bent the bundle.
+      ctx.beginPath();
+      let any = false;
+      for (let h = 0; h < HAIR_COUNT; h++) {
+        const tip = h * NODES + NODES - 1;
+        if (pz[tip] <= PAPER_Z + .08) {
+          ctx.moveTo(px[tip] + .28, py[tip]);
+          ctx.arc(px[tip], py[tip], .28, 0, Math.PI * 2);
+          lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 1;
+          any = true;
+        }
+      }
+      if (any) { ctx.fillStyle = ink; ctx.globalAlpha = 1; ctx.fill(); }
+    }
     function simulate() {
       // Two substeps retain bend history even when PointerEvents arrive sparsely.
       for (let step = 0; step < 2; step++) { integrate(); solveConstraints(); depositInk(); }
@@ -225,7 +239,7 @@
       brush.x = e.clientX; brush.y = e.clientY; brush.minSize = size; brush.nativePressureSeen = false;
       brush.pressure = pressureFromContact(e, size);
       brush.rootZ = 116 - brush.pressure * 89;
-      brush.active = true; resetBristles();
+      brush.active = true; resetBristles(); stampInitialContact();
       say('毛の物理計算で描画中', 1050);
       e.preventDefault();
     }, { passive: false });
