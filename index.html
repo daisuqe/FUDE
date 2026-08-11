@@ -27,11 +27,13 @@
     const canvas = document.querySelector('#paper');
     const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     const notice = document.querySelector('#notice');
-    const HAIR_COUNT = 2000;
+    const HAIR_COUNT = 500;
     const NODES = 5;                 // 根元 + 4節。各節を3Dで計算する。
     const PARTICLES = HAIR_COUNT * NODES;
     const PAPER_Z = 0;
     const ink = '#100c09';
+    const LENGTH_SCALE = .7;
+    const ROOT_RADIUS = 20;          // 以前の2倍: 描画される筆幅も2倍。
     let dpr = 1, activePointer = null, clearTimer = 0, messageTimer = 0;
 
     // Position and previous-position pairs form a Verlet 3D particle system.
@@ -46,16 +48,16 @@
       // Only the central fibres are longest; length decreases smoothly to the rim.
       const center = Math.pow(1 - radius, .72);
       return {
-        rootX: Math.cos(angle) * radius * 10,
-        rootY: Math.sin(angle) * radius * 10,
+        rootX: Math.cos(angle) * radius * ROOT_RADIUS,
+        rootY: Math.sin(angle) * radius * ROOT_RADIUS,
         // A pointed brush: long compliant central hairs, short firmer outside hairs.
-        length: 42 + 76 * center,
-        segment: (42 + 76 * center) / (NODES - 1),
+        length: (42 + 76 * center) * LENGTH_SCALE,
+        segment: (42 + 76 * center) * LENGTH_SCALE / (NODES - 1),
         damping: .80 + .11 * center,
         slip: .045 + .16 * center
       };
     });
-    const brush = { active: false, x: 0, y: 0, pressure: 0, rootZ: 112, minSize: 0, nativePressureSeen: false };
+    const brush = { active: false, x: 0, y: 0, pressure: 0, rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false };
 
     function fit() {
       dpr = Math.min(devicePixelRatio || 1, 2);
@@ -193,7 +195,8 @@
         // Fully loaded, wet black ink: density is not tied to pressure.
         ctx.globalAlpha = 1;
         ctx.strokeStyle = ink;
-        ctx.lineWidth = .38;
+        // 500本へ減らした分、各毛は以前より太く描く。
+        ctx.lineWidth = .92;
         ctx.stroke();
       }
     }
@@ -206,8 +209,8 @@
       for (let h = 0; h < HAIR_COUNT; h++) {
         const tip = h * NODES + NODES - 1;
         if (pz[tip] <= PAPER_Z + .08) {
-          ctx.moveTo(px[tip] + .28, py[tip]);
-          ctx.arc(px[tip], py[tip], .28, 0, Math.PI * 2);
+          ctx.moveTo(px[tip] + .62, py[tip]);
+          ctx.arc(px[tip], py[tip], .62, 0, Math.PI * 2);
           lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 1;
           any = true;
         }
@@ -238,7 +241,7 @@
       activePointer = e.pointerId;
       brush.x = e.clientX; brush.y = e.clientY; brush.minSize = size; brush.nativePressureSeen = false;
       brush.pressure = pressureFromContact(e, size);
-      brush.rootZ = 116 - brush.pressure * 89;
+      brush.rootZ = (116 - brush.pressure * 89) * LENGTH_SCALE;
       brush.active = true; resetBristles(); stampInitialContact();
       say('毛の物理計算で描画中', 1050);
       e.preventDefault();
@@ -249,7 +252,7 @@
       const size = contactSize(e); if (size === null) return;
       brush.x = e.clientX; brush.y = e.clientY;
       brush.pressure = pressureFromContact(e, size);
-      brush.rootZ = 116 - brush.pressure * 89;
+      brush.rootZ = (116 - brush.pressure * 89) * LENGTH_SCALE;
       e.preventDefault();
     }, { passive: false });
     function endPointer(e) {
