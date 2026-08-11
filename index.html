@@ -27,7 +27,7 @@
     const canvas = document.querySelector('#paper');
     const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     const notice = document.querySelector('#notice');
-    const HAIR_COUNT = 500;
+    const HAIR_COUNT = 2000;
     const ink = '#171310';
     let dpr = 1, active = null, clearTimer = 0, messageTimer = 0;
 
@@ -36,12 +36,14 @@
       const a = i * 2.399963229728653; // golden angle: evenly fills the circular root
       const r = Math.sqrt((i + .5) / HAIR_COUNT);
       const edge = Math.pow(r, 1.7);
+      // 微妙な長短と強さの違いが、含み墨を持った濡れた毛先の輪郭を作る。
+      const variation = .93 + (((Math.sin(i * 78.233) * 43758.5453) % 1 + 1) % 1) * .14;
       return {
         x: Math.cos(a) * r,
         y: Math.sin(a) * r,
-        length: .42 + .58 * Math.pow(1 - r, .68),
+        length: (.42 + .58 * Math.pow(1 - r, .68)) * variation,
         stiffness: .28 + .72 * Math.pow(1 - r, .45),
-        grain: Math.sin(i * 12.9898) * 43758.5453 % 1
+        grain: variation
       };
     });
 
@@ -89,29 +91,34 @@
       return { x, y, size, ux, uy, speed };
     }
 
-    function bristleTip(sample, hair, depression) {
+    function bristleTip(sample, hair, depression, state) {
       // Root fans out under compression.  The local y axis rotates with the stroke direction.
       const sideX = -sample.uy, sideY = sample.ux;
-      const spread = (3.5 + 28 * depression) * (0.22 + .78 * hair.length);
+      // 旧設定のちょうど1.5倍。押圧カーブは別に強め、普段のタッチでも太さの差が出る。
+      const spread = (5.25 + 42 * depression) * (0.22 + .78 * hair.length);
       const rx = sideX * hair.x * spread + sample.ux * hair.y * spread * .32;
       const ry = sideY * hair.x * spread + sample.uy * hair.y * spread * .32;
 
       // The pressed shaft bends backward (opposite travel); long central hairs bend farther.
       // A tiny radial term makes individual hairs peel away in three dimensions, not as a flat stamp.
-      const bend = depression * (9 + 38 * hair.length) * (1.18 - .55 * hair.stiffness);
+      const bend = depression * (12 + 52 * hair.length) * (1.18 - .55 * hair.stiffness);
       const liftProjection = depression * hair.length * 8;
       const peel = (1 - depression) * 2.5 + hair.x * liftProjection;
       return {
-        x: sample.x + rx - sample.ux * bend + sideX * peel,
-        y: sample.y + ry - sample.uy * bend + sideY * peel
+        // state.escape is a delayed force vector.  At a corner it retains the
+        // previous bend for a moment, so the hair tip naturally takes a small arc.
+        x: sample.x + rx + state.escapeX * bend + sideX * peel,
+        y: sample.y + ry + state.escapeY * bend + sideY * peel
       };
     }
 
     function drawSegment(before, after, state) {
-      const change = Math.abs(after.size - before.size);
-      const base = state.baseSize;
-      // The only pressure coefficient is derived from event.width and event.height.
-      const depression = Math.max(.06, Math.min(1, (after.size - base * .78) / (base * 1.7)));
+      state.minSize = Math.min(state.minSize, after.size);
+      // The pressure coefficient uses only event.width / event.height.  It combines
+      // their absolute contact area with change from the lightest touch in this stroke.
+      const absolute = Math.max(0, Math.min(1, (after.size - 2.5) / 18));
+      const relative = Math.max(0, Math.min(1, (after.size - state.minSize) / Math.max(2.4, state.minSize * .28)));
+      const depression = Math.max(.035, Math.pow(Math.max(absolute, relative), .52));
       const distance = Math.max(1, Math.hypot(after.x - before.x, after.y - before.y));
       const repeats = Math.min(4, Math.max(1, Math.ceil(distance / 5)));
       for (let step = 1; step <= repeats; step++) {
@@ -119,16 +126,22 @@
         const oldT = (step - 1) / repeats;
         const a = { x: before.x + (after.x - before.x) * oldT, y: before.y + (after.y - before.y) * oldT, size: before.size + (after.size - before.size) * oldT, ux: after.ux, uy: after.uy };
         const b = { x: before.x + (after.x - before.x) * t, y: before.y + (after.y - before.y) * t, size: before.size + (after.size - before.size) * t, ux: after.ux, uy: after.uy };
+        // A compressed brush bends more and returns more slowly: this is the
+        // source of the characteristic "go around the corner" behaviour.
+        const follow = .42 - depression * .24;
+        state.escapeX += (-b.ux - state.escapeX) * follow;
+        state.escapeY += (-b.uy - state.escapeY) * follow;
         ctx.beginPath();
         for (const hair of hairs) {
-          const p = bristleTip(a, hair, depression);
-          const q = bristleTip(b, hair, depression);
+          const p = bristleTip(a, hair, depression, state);
+          const q = bristleTip(b, hair, depression, state);
           ctx.moveTo(p.x, p.y);
           ctx.lineTo(q.x, q.y);
         }
         ctx.strokeStyle = ink;
-        ctx.globalAlpha = .04 + depression * .052;
-        ctx.lineWidth = .25 + depression * .42;
+        // Loaded ink: every bristle is fully opaque.  Darkness never changes with pressure.
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = .38 + depression * .63;
         ctx.stroke();
       }
       ctx.globalAlpha = 1;
@@ -150,7 +163,14 @@
       }
       canvas.setPointerCapture(e.pointerId);
       const now = makeSample(e, size, null);
-      active = { id: e.pointerId, baseSize: size, last: now };
+      active = {
+        id: e.pointerId,
+        minSize: size,
+        // At rest, all hairs initially lean backwards from the first movement.
+        escapeX: -now.ux,
+        escapeY: -now.uy,
+        last: now
+      };
       say('筆を運んでください', 850);
       e.preventDefault();
     }, { passive: false });
