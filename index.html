@@ -65,6 +65,7 @@
         // Slight individual differences prevent all hairs from bending in lockstep.
         damping: Math.min(.98, (.80 + .11 * center) * individuality),
         gravity: .30 * individuality,
+        bendStiffness: Math.min(.92, .82 * individuality),
         // Very small tangential velocity after paper collision = a tip that stays put.
         slip: (.012 + .065 * center) / individuality
       };
@@ -192,6 +193,20 @@
               px[b] -= dx * correction * .5; py[b] -= dy * correction * .5; pz[b] -= dz * correction * .5;
             }
           }
+          // A second-neighbour constraint is bending rigidity: it makes each
+          // pair of segments favour a straight line, rather than a loose chain.
+          for (let n = 0; n < NODES - 2; n++) {
+            const a = start + n, c = a + 2;
+            const dx = px[c] - px[a], dy = py[c] - py[a], dz = pz[c] - pz[a];
+            const distance = Math.hypot(dx, dy, dz) || .0001;
+            const correction = (distance - hair.segment * 2) / distance * hair.bendStiffness;
+            if (n === 0) {
+              px[c] -= dx * correction; py[c] -= dy * correction; pz[c] -= dz * correction;
+            } else {
+              px[a] += dx * correction * .5; py[a] += dy * correction * .5; pz[a] += dz * correction * .5;
+              px[c] -= dx * correction * .5; py[c] -= dy * correction * .5; pz[c] -= dz * correction * .5;
+            }
+          }
         }
         // Paper collision with high tangential friction is what makes tips trail
         // behind the moving root instead of imposing an artificial raindrop shape.
@@ -209,14 +224,14 @@
         }
         // Surface-tension bridges resist separation between adjacent wet tips.
         // The slack grows only for a deep press, allowing a controlled small splay.
-        const liquidSlack = .35 + 3.5 * brush.pressure * brush.pressure;
+        const liquidSlack = .12 + 1.4 * brush.pressure * brush.pressure;
         for (const link of liquidLinks) {
           const a = link.a * NODES + NODES - 1, b = link.b * NODES + NODES - 1;
           const dx = px[b] - px[a], dy = py[b] - py[a];
           const distance = Math.hypot(dx, dy) || .0001;
           const limit = link.rest + liquidSlack;
           if (distance > limit) {
-            const correction = (distance - limit) / distance * .68;
+            const correction = (distance - limit) / distance * .90;
             px[a] += dx * correction; py[a] += dy * correction;
             px[b] -= dx * correction; py[b] -= dy * correction;
           }
