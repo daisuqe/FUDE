@@ -14,9 +14,9 @@ window.addEventListener('resize', resize);
 resize();
 
 // --- 筆のパラメータ ---
-const NUM_BRISTLES = 500;
-const BRUSH_RADIUS = 15;
-const MAX_LENGTH = 40;
+const NUM_BRISTLES = 2000;
+const BRUSH_RADIUS = 45;
+const MAX_LENGTH = 120;
 
 const bristles = [];
 for (let i = 0; i < NUM_BRISTLES; i++) {
@@ -27,7 +27,9 @@ for (let i = 0; i < NUM_BRISTLES; i++) {
     let ry = r * Math.sin(theta);
     
     // 中央が長く、外側が短い（筆特有のとがっている形状）
+    // わずかにランダムなばらつきを加えてウェット感を出す
     let L = MAX_LENGTH * (1 - 0.7 * (r / BRUSH_RADIUS)); 
+    L += (Math.random() - 0.5) * (MAX_LENGTH * 0.1); 
     
     bristles.push({
         rx, ry, L,
@@ -56,16 +58,16 @@ function getPressureZ(e) {
     let size = Math.max(e.width || 1, e.height || 1);
     
     // sizeの想定範囲: 軽いタッチ(5~10) 〜 強いタッチ(40~50)
-    let pressureCoeff = Math.min(1, Math.max(0, (size - 5) / 40)); 
+    // 一般的なタッチでも太さが極端に変わるように敏感なカーブを使用
+    let pressureCoeff = Math.min(1, Math.max(0, (size - 10) / 40)); 
+    pressureCoeff = Math.pow(pressureCoeff, 0.7); // 立ち上がりを早くする
     
     // Z座標を決定。0が紙面。
-    // 係数が0の時 Z = 0.95 * MAX_LENGTH (先端が少し触れる程度)
-    // 係数が1の時 Z はマイナスになり、毛が大きくたわむ
-    let currentZ = MAX_LENGTH * 0.95 - (MAX_LENGTH * 1.5 * pressureCoeff);
+    let currentZ = MAX_LENGTH * (1.0 - pressureCoeff * 1.3);
     
     // タッチ非対応環境(PCなど)では常に1になることがあるため、フォールバック（動作保証外だが一応描けるように）
     if (e.pointerType === 'mouse' || (e.width === 1 && e.height === 1)) {
-        currentZ = MAX_LENGTH * 0.3; // 中くらいの太さ
+        currentZ = MAX_LENGTH * 0.5; // 中くらいの太さ
     }
     
     return currentZ;
@@ -183,8 +185,8 @@ function loop() {
             let targetY = hy + b.ry * converge;
             let targetZ = rootZ - b.L;
             
-            // バネモデルによる力
-            let spring = 0.4;
+            // バネモデルによる力（追従性。弱いと角で遠回りするラグが出る）
+            let spring = 0.15; 
             b.vx += (targetX - b.x) * spring;
             b.vy += (targetY - b.y) * spring;
             b.vz += (targetZ - b.z) * spring;
@@ -200,9 +202,9 @@ function loop() {
                 b.z = 0;
                 onPaper = true;
                 
-                // 紙との摩擦
-                b.vx *= 0.5;
-                b.vy *= 0.5;
+                // 紙との摩擦（強くして筆先が引きずられる・角で遠回りする感覚を出す）
+                b.vx *= 0.3;
+                b.vy *= 0.3;
                 if (b.vz < 0) b.vz = 0;
                 
                 let compression = b.L - rootZ; 
@@ -211,13 +213,13 @@ function loop() {
                     let outLen = Math.sqrt(b.rx * b.rx + b.ry * b.ry) || 1;
                     
                     // 1. 押し込まれたことによって外側に広がる
-                    let splayForce = (compression / b.L) * 1.5; 
+                    let splayForce = (compression / b.L) * 2.0; 
                     b.vx += (b.rx / outLen) * splayForce;
                     b.vy += (b.ry / outLen) * splayForce;
                     
-                    // 2. 進行方向の逆方向に逃げる（引きずる効果）
-                    b.vx -= stepDx * 0.4;
-                    b.vy -= stepDy * 0.4;
+                    // 2. 進行方向の逆方向に逃げる（引きずる効果、角で膨らむ）
+                    b.vx -= stepDx * 0.8;
+                    b.vy -= stepDy * 0.8;
                 }
             } else {
                 // 空中での減衰
@@ -253,8 +255,9 @@ function loop() {
             b.wasOnPaper = onPaper;
         }
         
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.05)';
-        ctx.lineWidth = 1.2;
+        // 濃さは変えず（2000本重なるので薄めにして真っ黒にする）
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.03)';
+        ctx.lineWidth = 1.0;
         ctx.lineCap = 'round';
         ctx.stroke();
     }
