@@ -235,14 +235,14 @@
         }
         // Surface-tension bridges resist separation between adjacent wet tips.
         // The slack grows only for a deep press, allowing a controlled small splay.
-        const liquidSlack = .03 + .45 * brush.pressure * brush.pressure;
+        const liquidSlack = .005 + .15 * brush.pressure * brush.pressure;
         for (const link of liquidLinks) {
           const a = link.a * NODES + NODES - 1, b = link.b * NODES + NODES - 1;
           const dx = px[b] - px[a], dy = py[b] - py[a];
           const distance = Math.hypot(dx, dy) || .0001;
           const limit = link.rest + liquidSlack;
           if (distance > limit) {
-            const correction = (distance - limit) / distance * .98;
+            const correction = (distance - limit) / distance;
             px[a] += dx * correction; py[a] += dy * correction;
             px[b] -= dx * correction; py[b] -= dy * correction;
           }
@@ -254,7 +254,11 @@
       let any = false;
       for (let h = 0; h < HAIR_COUNT; h++) {
         const tip = h * NODES + NODES - 1;
-        if (pz[tip] <= PAPER_Z + .08) {
+        // When lifting, shorter outer hairs lose vertical support first.  They may
+        // still be physically trailing on the paper, but no longer receive enough
+        // ink transfer; the long central hairs therefore form a pointed harai.
+        const hasVerticalSupport = hairs[h].length >= brush.rootZ - .5;
+        if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport) {
           if (wasWet[h]) {
             const dx = px[tip] - lastInkX[h], dy = py[tip] - lastInkY[h];
             // A zero-length Canvas stroke still paints its round cap as a dot.
@@ -280,7 +284,7 @@
       // At an extreme press the root-side of the bundle also reaches the wet
       // paper.  Four-times-radius root footprints overlap into one mashed mass.
       if (brush.rootZ <= ROOT_CONTACT_Z) {
-        const rootInkRadius = HAIR_STROKE_WIDTH * 2; // normal radius (.64) × 4
+        const rootInkRadius = HAIR_STROKE_WIDTH * 1.3; // normal radius (.64) × (4 × .65)
         ctx.beginPath();
         for (let h = 0; h < HAIR_COUNT; h++) {
           const root = h * NODES;
