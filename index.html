@@ -57,7 +57,7 @@
         slip: .045 + .16 * center
       };
     });
-    const brush = { active: false, x: 0, y: 0, pressure: 0, rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false };
+    const brush = { active: false, drawEnabled: false, x: 0, y: 0, pressure: 0, rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false };
 
     function fit() {
       dpr = Math.min(devicePixelRatio || 1, 2);
@@ -200,28 +200,14 @@
         ctx.stroke();
       }
     }
-    function stampInitialContact() {
-      // At rest, wet ink from adjacent contacting tips immediately joins together.
-      // Treat that connected contact patch as one pool, rather than 500 separate
-      // dots; otherwise the spaced roots visibly make a firework-like halo.
-      let contactCount = 0, furthest = 0;
-      for (let h = 0; h < HAIR_COUNT; h++) {
-        const tip = h * NODES + NODES - 1;
-        if (pz[tip] <= PAPER_Z + .08) {
-          furthest = Math.max(furthest, Math.hypot(px[tip] - brush.x, py[tip] - brush.y));
-          lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 0;
-          contactCount++;
-        }
-      }
-      if (contactCount) {
-        const pooledRadius = Math.max(.85, Math.min(ROOT_RADIUS * .65, furthest * .80 + .8));
-        ctx.beginPath(); ctx.arc(brush.x, brush.y, pooledRadius, 0, Math.PI * 2);
-        ctx.fillStyle = ink; ctx.globalAlpha = 1; ctx.fill();
-      }
-    }
     function simulate() {
       // Two substeps retain bend history even when PointerEvents arrive sparsely.
-      for (let step = 0; step < 2; step++) { integrate(); solveConstraints(); depositInk(); }
+      for (let step = 0; step < 2; step++) {
+        integrate(); solveConstraints();
+        // Placing or pressing the brush is simulation only. Ink starts when the
+        // handle actually travels, avoiding an initial circular "splash".
+        if (brush.drawEnabled) depositInk();
+      }
     }
     function frame() {
       if (brush.active) simulate();
@@ -244,7 +230,7 @@
       brush.x = e.clientX; brush.y = e.clientY; brush.minSize = size; brush.nativePressureSeen = false;
       brush.pressure = pressureFromContact(e, size);
       brush.rootZ = (116 - brush.pressure * 89) * LENGTH_SCALE;
-      brush.active = true; resetBristles(); stampInitialContact();
+      brush.active = true; brush.drawEnabled = false; resetBristles();
       say('毛の物理計算で描画中', 1050);
       e.preventDefault();
     }, { passive: false });
@@ -252,6 +238,7 @@
       if (clearTimer) { if (!isClearCorner(e)) cancelClear(); return; }
       if (!brush.active || activePointer !== e.pointerId) return;
       const size = contactSize(e); if (size === null) return;
+      if (Math.hypot(e.clientX - brush.x, e.clientY - brush.y) > .35) brush.drawEnabled = true;
       brush.x = e.clientX; brush.y = e.clientY;
       brush.pressure = pressureFromContact(e, size);
       brush.rootZ = (116 - brush.pressure * 89) * LENGTH_SCALE;
@@ -259,7 +246,7 @@
     }, { passive: false });
     function endPointer(e) {
       cancelClear();
-      if (activePointer === e.pointerId) { brush.active = false; activePointer = null; }
+      if (activePointer === e.pointerId) { brush.active = false; brush.drawEnabled = false; activePointer = null; }
     }
     canvas.addEventListener('pointerup', endPointer);
     canvas.addEventListener('pointercancel', endPointer);
