@@ -94,10 +94,18 @@
     function bristleTip(sample, hair, depression, state) {
       // Root fans out under compression.  The local y axis rotates with the stroke direction.
       const sideX = -sample.uy, sideY = sample.ux;
-      // 旧設定のちょうど1.5倍。押圧カーブは別に強め、普段のタッチでも太さの差が出る。
-      const spread = (5.25 + 42 * depression) * (0.22 + .78 * hair.length);
-      const rx = sideX * hair.x * spread + sample.ux * hair.y * spread * .32;
-      const ry = sideY * hair.x * spread + sample.uy * hair.y * spread * .32;
+      // The footprint is not a circular stamp.  Compression keeps the requested
+      // 1.5x width, but extends much farther along travel.  The leading half is
+      // narrowed, creating the pointed, raindrop-shaped brush footprint.
+      const sideSpread = 5.25 + 42 * depression;
+      const travelSpread = 7 + 70 * depression;
+      const lead = Math.max(0, Math.min(1, (hair.y + 1) * .5));
+      const leadTaper = .42 + .58 * (1 - lead);
+      const radialLength = .22 + .78 * hair.length;
+      const rootSide = hair.x * sideSpread * radialLength * leadTaper;
+      const rootTravel = hair.y * travelSpread * radialLength;
+      const rx = sideX * rootSide + sample.ux * rootTravel;
+      const ry = sideY * rootSide + sample.uy * rootTravel;
 
       // The pressed shaft bends backward (opposite travel); long central hairs bend farther.
       // A tiny radial term makes individual hairs peel away in three dimensions, not as a flat stamp.
@@ -116,9 +124,11 @@
       state.minSize = Math.min(state.minSize, after.size);
       // The pressure coefficient uses only event.width / event.height.  It combines
       // their absolute contact area with change from the lightest touch in this stroke.
-      const absolute = Math.max(0, Math.min(1, (after.size - 2.5) / 18));
-      const relative = Math.max(0, Math.min(1, (after.size - state.minSize) / Math.max(2.4, state.minSize * .28)));
-      const depression = Math.max(.035, Math.pow(Math.max(absolute, relative), .52));
+      // Do not saturate at ordinary finger-contact sizes.  These ranges make a
+      // 5px light touch, 20px normal touch, and 40px hard press visibly distinct.
+      const absolute = Math.max(0, Math.min(1, (after.size - 2) / 42));
+      const relative = Math.max(0, Math.min(1, (after.size - state.minSize) / Math.max(1.1, state.minSize * .10)));
+      const depression = Math.max(.025, Math.pow(Math.max(absolute, relative), .62));
       const distance = Math.max(1, Math.hypot(after.x - before.x, after.y - before.y));
       const repeats = Math.min(4, Math.max(1, Math.ceil(distance / 5)));
       for (let step = 1; step <= repeats; step++) {
