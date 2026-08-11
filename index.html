@@ -34,6 +34,8 @@
     const ink = '#100c09';
     const LENGTH_SCALE = .7;
     const ROOT_RADIUS = 20;          // 以前の2倍: 描画される筆幅も2倍。
+    const HAIR_STROKE_WIDTH = 1.28;
+    const ROOT_CONTACT_Z = 7;        // The ferrule-side roots are now wetting the paper.
     let dpr = 1, activePointer = null, clearTimer = 0, messageTimer = 0;
 
     // Reproducible randomness: natural-looking placement without changing between runs.
@@ -131,15 +133,16 @@
     function pressureFromContact(e, size) {
       const suppliedPressure = nativePressure(e);
       brush.minSize = Math.min(brush.minSize, size);
-      const absolute = Math.max(0, Math.min(1, (size - 2) / 42));
+      const absolute = Math.max(0, Math.min(1, (size - 2) / 24));
       const relative = Math.max(0, Math.min(1, (size - brush.minSize) / Math.max(1.1, brush.minSize * .10)));
       const areaPressure = Math.max(absolute, relative);
-      // Both force and contact area contribute.  A very steep curve keeps the
-      // middle range deliberately light; maximum width needs a deep press.
-      const combined = suppliedPressure === null
-        ? areaPressure
-        : suppliedPressure * .68 + areaPressure * .32;
-      return Math.max(.008, Math.pow(combined, 3.2));
+      // Calculate both signals.  Either a strong force reading or a large contact
+      // patch is enough to register a hard press, preventing maximum pressure
+      // from being lost merely because the other sensor has a smaller range.
+      const forcePressure = suppliedPressure ?? 0;
+      const hardSignal = Math.max(forcePressure, areaPressure);
+      const normalized = Math.max(0, Math.min(1, (hardSignal - .10) / .80));
+      return Math.max(.008, Math.pow(normalized, 1.65));
     }
     function rootPosition(hair, x, y, z) { return { x: x + hair.rootX, y: y + hair.rootY, z }; }
 
@@ -271,8 +274,20 @@
         ctx.globalAlpha = 1;
         ctx.strokeStyle = ink;
         // 500本へ減らした分、各毛は以前より太く描く。
-        ctx.lineWidth = 1.28;
+        ctx.lineWidth = HAIR_STROKE_WIDTH;
         ctx.stroke();
+      }
+      // At an extreme press the root-side of the bundle also reaches the wet
+      // paper.  Four-times-radius root footprints overlap into one mashed mass.
+      if (brush.rootZ <= ROOT_CONTACT_Z) {
+        const rootInkRadius = HAIR_STROKE_WIDTH * 2; // normal radius (.64) × 4
+        ctx.beginPath();
+        for (let h = 0; h < HAIR_COUNT; h++) {
+          const root = h * NODES;
+          ctx.moveTo(px[root] + rootInkRadius, py[root]);
+          ctx.arc(px[root], py[root], rootInkRadius, 0, Math.PI * 2);
+        }
+        ctx.fillStyle = ink; ctx.globalAlpha = 1; ctx.fill();
       }
     }
     function simulate() {
@@ -304,7 +319,7 @@
       activePointer = e.pointerId;
       brush.x = e.clientX; brush.y = e.clientY; brush.minSize = size; brush.nativePressureSeen = false;
       brush.pressure = pressureFromContact(e, size);
-      brush.rootZ = (116 - brush.pressure * 89) * LENGTH_SCALE;
+      brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
       brush.active = true; brush.drawEnabled = false; resetBristles();
       say('毛の物理計算で描画中', 1050);
       e.preventDefault();
@@ -316,7 +331,7 @@
       if (Math.hypot(e.clientX - brush.x, e.clientY - brush.y) > .35) brush.drawEnabled = true;
       brush.x = e.clientX; brush.y = e.clientY;
       brush.pressure = pressureFromContact(e, size);
-      brush.rootZ = (116 - brush.pressure * 89) * LENGTH_SCALE;
+      brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
       e.preventDefault();
     }, { passive: false });
     function endPointer(e) {
