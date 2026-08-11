@@ -75,15 +75,18 @@
     const liquidLinks = (() => {
       const keys = new Set();
       for (let a = 0; a < HAIR_COUNT; a++) {
-        let first = -1, second = -1, firstD = Infinity, secondD = Infinity;
+        let first = -1, second = -1, third = -1, firstD = Infinity, secondD = Infinity, thirdD = Infinity;
         for (let b = 0; b < HAIR_COUNT; b++) {
           if (a === b) continue;
           const dx = hairs[a].rootX - hairs[b].rootX, dy = hairs[a].rootY - hairs[b].rootY;
           const distanceSq = dx * dx + dy * dy;
-          if (distanceSq < firstD) { second = first; secondD = firstD; first = b; firstD = distanceSq; }
-          else if (distanceSq < secondD) { second = b; secondD = distanceSq; }
+          if (distanceSq < firstD) {
+            third = second; thirdD = secondD; second = first; secondD = firstD; first = b; firstD = distanceSq;
+          } else if (distanceSq < secondD) {
+            third = second; thirdD = secondD; second = b; secondD = distanceSq;
+          } else if (distanceSq < thirdD) { third = b; thirdD = distanceSq; }
         }
-        for (const b of [first, second]) if (b >= 0) keys.add(`${Math.min(a, b)}:${Math.max(a, b)}`);
+        for (const b of [first, second, third]) if (b >= 0) keys.add(`${Math.min(a, b)}:${Math.max(a, b)}`);
       }
       return [...keys].map(key => {
         const [a, b] = key.split(':').map(Number);
@@ -127,11 +130,16 @@
     // Width and height are used when the device does not expose usable pressure.
     function pressureFromContact(e, size) {
       const suppliedPressure = nativePressure(e);
-      if (suppliedPressure !== null) return Math.max(.035, Math.pow(suppliedPressure, 1.7));
       brush.minSize = Math.min(brush.minSize, size);
       const absolute = Math.max(0, Math.min(1, (size - 2) / 42));
       const relative = Math.max(0, Math.min(1, (size - brush.minSize) / Math.max(1.1, brush.minSize * .10)));
-      return Math.max(.035, Math.pow(Math.max(absolute, relative), 1.7));
+      const areaPressure = Math.max(absolute, relative);
+      // Both force and contact area contribute.  A very steep curve keeps the
+      // middle range deliberately light; maximum width needs a deep press.
+      const combined = suppliedPressure === null
+        ? areaPressure
+        : suppliedPressure * .68 + areaPressure * .32;
+      return Math.max(.008, Math.pow(combined, 3.2));
     }
     function rootPosition(hair, x, y, z) { return { x: x + hair.rootX, y: y + hair.rootY, z }; }
 
@@ -224,14 +232,14 @@
         }
         // Surface-tension bridges resist separation between adjacent wet tips.
         // The slack grows only for a deep press, allowing a controlled small splay.
-        const liquidSlack = .12 + 1.4 * brush.pressure * brush.pressure;
+        const liquidSlack = .03 + .45 * brush.pressure * brush.pressure;
         for (const link of liquidLinks) {
           const a = link.a * NODES + NODES - 1, b = link.b * NODES + NODES - 1;
           const dx = px[b] - px[a], dy = py[b] - py[a];
           const distance = Math.hypot(dx, dy) || .0001;
           const limit = link.rest + liquidSlack;
           if (distance > limit) {
-            const correction = (distance - limit) / distance * .90;
+            const correction = (distance - limit) / distance * .98;
             px[a] += dx * correction; py[a] += dy * correction;
             px[b] -= dx * correction; py[b] -= dy * correction;
           }
