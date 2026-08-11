@@ -52,6 +52,7 @@
       // unlike a mathematically even spiral distribution.
       const angle = randomAt(i, 1) * Math.PI * 2;
       const radius = Math.sqrt(randomAt(i, 2));
+      const individuality = .90 + randomAt(i, 3) * .20; // ±10% per fibre
       // No random length variation: build a clean, conventional rounded brush first.
       // Only the central fibres are longest; length decreases smoothly to the rim.
       const center = Math.pow(1 - radius, .72);
@@ -61,9 +62,11 @@
         // A pointed brush: long compliant central hairs, short firmer outside hairs.
         length: (42 + 76 * center) * LENGTH_SCALE,
         segment: (42 + 76 * center) * LENGTH_SCALE / (NODES - 1),
-        damping: .80 + .11 * center,
+        // Slight individual differences prevent all hairs from bending in lockstep.
+        damping: Math.min(.98, (.80 + .11 * center) * individuality),
+        gravity: .30 * individuality,
         // Very small tangential velocity after paper collision = a tip that stays put.
-        slip: .012 + .065 * center
+        slip: (.012 + .065 * center) / individuality
       };
     });
     // Liquid bridges link nearby hairs.  Links have a slack limit rather than a
@@ -165,7 +168,7 @@
           const j = start + n;
           const vx = (px[j] - ox[j]) * hair.damping;
           const vy = (py[j] - oy[j]) * hair.damping;
-          const vz = (pz[j] - oz[j]) * hair.damping - .30; // gravity toward the paper
+          const vz = (pz[j] - oz[j]) * hair.damping - hair.gravity; // gravity toward the paper
           ox[j] = px[j]; oy[j] = py[j]; oz[j] = pz[j];
           px[j] += vx; py[j] += vy; pz[j] += vz;
         }
@@ -206,14 +209,14 @@
         }
         // Surface-tension bridges resist separation between adjacent wet tips.
         // The slack grows only for a deep press, allowing a controlled small splay.
-        const liquidSlack = 1.0 + 8 * brush.pressure * brush.pressure;
+        const liquidSlack = .35 + 3.5 * brush.pressure * brush.pressure;
         for (const link of liquidLinks) {
           const a = link.a * NODES + NODES - 1, b = link.b * NODES + NODES - 1;
           const dx = px[b] - px[a], dy = py[b] - py[a];
           const distance = Math.hypot(dx, dy) || .0001;
           const limit = link.rest + liquidSlack;
           if (distance > limit) {
-            const correction = (distance - limit) / distance * .34;
+            const correction = (distance - limit) / distance * .68;
             px[a] += dx * correction; py[a] += dy * correction;
             px[b] -= dx * correction; py[b] -= dy * correction;
           }
@@ -245,7 +248,7 @@
         ctx.globalAlpha = 1;
         ctx.strokeStyle = ink;
         // 500本へ減らした分、各毛は以前より太く描く。
-        ctx.lineWidth = .92;
+        ctx.lineWidth = 1.28;
         ctx.stroke();
       }
     }
