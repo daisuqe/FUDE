@@ -184,7 +184,13 @@
         const tip = h * NODES + NODES - 1;
         if (pz[tip] <= PAPER_Z + .08) {
           if (wasWet[h]) {
-            ctx.moveTo(lastInkX[h], lastInkY[h]); ctx.lineTo(px[tip], py[tip]); any = true;
+            const dx = px[tip] - lastInkX[h], dy = py[tip] - lastInkY[h];
+            // A zero-length Canvas stroke still paints its round cap as a dot.
+            // Do not transfer ink until this individual tip has genuinely moved;
+            // otherwise stationary root positions outline the brush as a circle.
+            if (dx * dx + dy * dy > .0225) {
+              ctx.moveTo(lastInkX[h], lastInkY[h]); ctx.lineTo(px[tip], py[tip]); any = true;
+            }
           }
           lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 1;
         } else {
