@@ -444,12 +444,21 @@
       }
     }
     function depositInk() {
+      const canHairReachPaper = h => {
+        const hair = hairs[h];
+        const root = rootPosition(hair, brush.x, brush.y, brush.rootZ);
+        // Only the vertical projection of a tilted fibre can bridge the distance
+        // to paper. As the handle rises, short rim fibres lose contact first and
+        // the long rounded centre of the brush remains.
+        const verticalReach = hair.length * brushSettings.tiltCos;
+        return root.z <= verticalReach + .55;
+      };
       // Find the actual centre of the currently contacting physical tips. The
       // harai envelope must shrink around this point, not around root indices.
       let centreX = 0, centreY = 0, contactCount = 0;
       for (let h = 0; h < HAIR_COUNT; h++) {
         const tip = h * NODES + NODES - 1;
-        const hasVerticalSupport = hairs[h].length >= brush.rootZ - .5;
+        const hasVerticalSupport = canHairReachPaper(h);
         if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport) {
           centreX += px[tip]; centreY += py[tip]; contactCount++;
         }
@@ -460,7 +469,7 @@
       let closestTip = -1, closestDistance = Infinity;
       for (let h = 0; h < HAIR_COUNT; h++) {
         const tip = h * NODES + NODES - 1;
-        if (pz[tip] <= PAPER_Z + .08) {
+        if (pz[tip] <= PAPER_Z + .08 && canHairReachPaper(h)) {
           const distance = Math.hypot(px[tip] - centreX, py[tip] - centreY);
           physicalRadius = Math.max(physicalRadius, distance);
           if (distance < closestDistance) { closestDistance = distance; closestTip = h; }
@@ -475,7 +484,7 @@
         // When lifting, shorter outer hairs lose vertical support first.  They may
         // still be physically trailing on the paper, but no longer receive enough
         // ink transfer; the long central hairs therefore form a pointed harai.
-        const hasVerticalSupport = hairs[h].length >= brush.rootZ - .5;
+        const hasVerticalSupport = canHairReachPaper(h);
         const hasInkSupply = Math.hypot(px[tip] - centreX, py[tip] - centreY) <= inkEnvelope
           || (brush.inkTaper < .08 && h === closestTip);
         if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport && hasInkSupply) {
