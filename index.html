@@ -104,7 +104,7 @@
       rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false,
       inputX: 0, inputY: 0, inputTime: 0, dirX: 0, dirY: -1, hasDirection: false,
       sensorPressure: 0, startedAt: 0, releasing: false, releaseStartedAt: 0,
-      lastMoveX: 0, lastMoveY: 1
+      lastMoveX: 0, lastMoveY: 1, turnStrength: 0
     };
 
     function fit() {
@@ -321,6 +321,25 @@
           }
           ox[tip] = px[tip]; oy[tip] = py[tip];
         }
+        // Japanese calligraphic turning (転折): the brush is briefly gathered
+        // before it is sent in the new direction.  This releases the old-side
+        // anchors into a compact, wet bundle instead of leaving dry side trails.
+        if (brush.turnStrength > .01) {
+          const gather = .30 * brush.turnStrength;
+          for (let h = 0; h < HAIR_COUNT; h++) {
+            const hair = hairs[h], root = rootPosition(hair, brush.x, brush.y, brush.rootZ), start = h * NODES;
+            for (let n = 1; n < NODES; n++) {
+              const j = start + n, fraction = n / (NODES - 1);
+              const targetX = root.x - brush.lastMoveX * TILT_SIN * hair.length * fraction;
+              const targetY = root.y - brush.lastMoveY * TILT_SIN * hair.length * fraction;
+              px[j] += (targetX - px[j]) * gather;
+              py[j] += (targetY - py[j]) * gather;
+              if (n === NODES - 1) {
+                anchorX[h] = px[j]; anchorY[h] = py[j]; tipAnchored[h] = 1;
+              }
+            }
+          }
+        }
       }
     }
     function depositInk() {
@@ -377,6 +396,7 @@
         // handle actually travels, avoiding an initial circular "splash".
         if (brush.drawEnabled) depositInk();
       }
+      brush.turnStrength *= .78;
     }
     function setBrushHeight(inputPressure, speed, now = performance.now()) {
       // Pressure/contact area already produce a nonlinear value.  A second curve
@@ -401,6 +421,9 @@
       setBrushHeight(inputPressure, speed);
       if (distance > .35) {
         const directionX = dx / distance, directionY = dy / distance;
+        if (brush.hasDirection && directionX * brush.lastMoveX + directionY * brush.lastMoveY < .72) {
+          brush.turnStrength = 1;
+        }
         if (!brush.hasDirection) {
           brush.dirX = directionX; brush.dirY = directionY; brush.hasDirection = true;
           // No ink has been deposited yet, so establish the inclined rest shape now.
@@ -465,6 +488,7 @@
       brush.dirX = 0; brush.dirY = -1; brush.hasDirection = false;
       brush.startedAt = performance.now(); brush.releasing = false;
       brush.lastMoveX = 0; brush.lastMoveY = 1;
+      brush.turnStrength = 0;
       setBrushHeight(pressureFromContact(e, size), 0);
       brush.active = true; brush.drawEnabled = false; resetBristles();
       say('毛の物理計算で描画中', 1050);
