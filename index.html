@@ -67,9 +67,9 @@
         length: (42 + 76 * center) * LENGTH_SCALE,
         segment: (42 + 76 * center) * LENGTH_SCALE / (NODES - 1),
         // Slight individual differences prevent all hairs from bending in lockstep.
-        damping: Math.min(.98, (.80 + .11 * center) * individuality),
+        damping: Math.min(.82, (.68 + .09 * center) * individuality),
         gravity: .30 * individuality,
-        bendStiffness: Math.min(.92, .82 * individuality),
+        bendStiffness: Math.min(.52, .42 * individuality),
         // Very small tangential velocity after paper collision = a tip that stays put.
         slip: (.012 + .065 * center) / individuality
       };
@@ -100,7 +100,9 @@
     const brush = {
       active: false, drawEnabled: false, x: 0, y: 0, pressure: 0,
       rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false,
-      inputX: 0, inputY: 0, inputTime: 0, dirX: 0, dirY: -1, hasDirection: false
+      inputX: 0, inputY: 0, inputTime: 0, dirX: 0, dirY: -1, hasDirection: false,
+      sensorPressure: 0, startedAt: 0, releasing: false, releaseStartedAt: 0,
+      lastMoveX: 0, lastMoveY: 1
     };
 
     function fit() {
@@ -339,13 +341,16 @@
         if (brush.drawEnabled) depositInk();
       }
     }
-    function setBrushHeight(inputPressure, speed) {
+    function setBrushHeight(inputPressure, speed, now = performance.now()) {
       // Pressure/contact area already produce a nonlinear value.  A second curve
       // makes a light touch visibly finer, while speed lifts the whole brush.
       const contactPressure = Math.pow(inputPressure, 1.35);
       // Normal writing speed retains a firm entry; only genuinely fast flicks lift.
       const speedLift = Math.min(.72, Math.max(0, speed - .65) * .32);
-      brush.pressure = contactPressure * (1 - speedLift);
+      brush.sensorPressure = contactPressure * (1 - speedLift);
+      // A deliberate one-second settling makes the start of every stroke soft.
+      const entry = Math.max(0, Math.min(1, (now - brush.startedAt) / 1000));
+      brush.pressure = brush.sensorPressure * entry;
       brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
     }
     function advancePointerSample(sample) {
@@ -364,12 +369,13 @@
           // No ink has been deposited yet, so establish the inclined rest shape now.
           resetBristles();
         } else {
-          // Directional inertia keeps the virtual handle from snapping at corners.
-          brush.dirX += (directionX - brush.dirX) * .28;
-          brush.dirY += (directionY - brush.dirY) * .28;
+          // A soft viscous bundle changes orientation slowly at a corner.
+          brush.dirX += (directionX - brush.dirX) * .075;
+          brush.dirY += (directionY - brush.dirY) * .075;
           const length = Math.hypot(brush.dirX, brush.dirY) || 1;
           brush.dirX /= length; brush.dirY /= length;
         }
+        brush.lastMoveX = directionX; brush.lastMoveY = directionY;
         brush.drawEnabled = true;
       }
 
@@ -384,8 +390,23 @@
       }
       brush.inputX = sample.clientX; brush.inputY = sample.clientY; brush.inputTime = sample.timeStamp;
     }
-    function frame() {
-      if (brush.active) simulate();
+    function frame(now) {
+      if (brush.active) {
+        if (brush.releasing) {
+          const remaining = Math.max(0, 1 - (now - brush.releaseStartedAt) / 1000);
+          if (remaining === 0) {
+            brush.active = false; brush.drawEnabled = false; brush.releasing = false;
+          } else {
+            brush.pressure = brush.sensorPressure * remaining;
+            brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
+            brush.x += brush.lastMoveX * .34 * remaining;
+            brush.y += brush.lastMoveY * .34 * remaining;
+            simulate();
+          }
+        } else {
+          simulate();
+        }
+      }
       requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
@@ -405,6 +426,8 @@
       brush.x = e.clientX; brush.y = e.clientY; brush.minSize = size; brush.nativePressureSeen = false;
       brush.inputX = e.clientX; brush.inputY = e.clientY; brush.inputTime = e.timeStamp;
       brush.dirX = 0; brush.dirY = -1; brush.hasDirection = false;
+      brush.startedAt = performance.now(); brush.releasing = false;
+      brush.lastMoveX = 0; brush.lastMoveY = 1;
       setBrushHeight(pressureFromContact(e, size), 0);
       brush.active = true; brush.drawEnabled = false; resetBristles();
       say('毛の物理計算で描画中', 1050);
@@ -420,7 +443,14 @@
     }, { passive: false });
     function endPointer(e) {
       cancelClear();
-      if (activePointer === e.pointerId) { brush.active = false; brush.drawEnabled = false; activePointer = null; }
+      if (activePointer === e.pointerId) {
+        activePointer = null;
+        if (e.type === 'pointerup' && brush.drawEnabled) {
+          brush.releasing = true; brush.releaseStartedAt = performance.now();
+        } else {
+          brush.active = false; brush.drawEnabled = false;
+        }
+      }
     }
     canvas.addEventListener('pointerup', endPointer);
     canvas.addEventListener('pointercancel', endPointer);
