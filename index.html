@@ -730,9 +730,11 @@
         brush.drawEnabled = true;
       }
 
-      // Fill sparse PointerEvents with physical substeps, rather than stamping
-      // the 500 tips only at event positions during a fast gesture.
-      const steps = Math.max(1, Math.ceil(distance / 2.5));
+      // Drive physics by travelled distance in both live and replay modes.
+      // At the old 2.5px spacing a fast event could move the roots farther than
+      // the wet tips could follow, briefly leaving no hair on the paper and
+      // producing gaps only in the final replay.
+      const steps = Math.max(1, Math.ceil(distance / .85));
       for (let step = 1; step <= steps; step++) {
         const ratio = step / steps;
         brush.x = brush.inputX + dx * ratio;
@@ -744,11 +746,8 @@
       brush.inputX = sample.clientX; brush.inputY = sample.clientY; brush.inputTime = sample.timeStamp;
     }
     function frame(now) {
-      if (brush.active && !replayingStroke) {
-        // Pointer/coalesced samples carry actual motion. Recording idle animation
-        // frames here would spend the harai interval at one fixed endpoint.
-        if (!brushSettings.finalRecompute) simulate();
-      }
+      // Physics is advanced by distance-interpolated PointerEvents.  Running an
+      // extra simulation only here made live mode denser and wetter than replay.
       requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
