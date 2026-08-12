@@ -36,6 +36,8 @@
     const ROOT_RADIUS = 20;          // 以前の2倍: 描画される筆幅も2倍。
     const HAIR_STROKE_WIDTH = 1.28;
     const ROOT_CONTACT_Z = 7;        // The ferrule-side roots are now wetting the paper.
+    const TILT_ANGLE = 30 * Math.PI / 180;
+    const TILT_SIN = Math.sin(TILT_ANGLE), TILT_COS = Math.cos(TILT_ANGLE), TILT_TAN = Math.tan(TILT_ANGLE);
     let dpr = 1, activePointer = null, clearTimer = 0, messageTimer = 0;
 
     // Reproducible randomness: natural-looking placement without changing between runs.
@@ -98,7 +100,7 @@
     const brush = {
       active: false, drawEnabled: false, x: 0, y: 0, pressure: 0,
       rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false,
-      inputX: 0, inputY: 0, inputTime: 0
+      inputX: 0, inputY: 0, inputTime: 0, dirX: 0, dirY: -1, hasDirection: false
     };
 
     function fit() {
@@ -148,7 +150,11 @@
       const normalized = Math.max(0, Math.min(1, (combinedPressure - .10) / .80));
       return Math.max(.008, Math.pow(normalized, 1.65));
     }
-    function rootPosition(hair, x, y, z) { return { x: x + hair.rootX, y: y + hair.rootY, z }; }
+    function rootPosition(hair, x, y, z) {
+      // Root plane is perpendicular to the 30°-tilted brush axis.
+      const forwardOffset = hair.rootX * brush.dirX + hair.rootY * brush.dirY;
+      return { x: x + hair.rootX, y: y + hair.rootY, z: z - forwardOffset * TILT_TAN };
+    }
 
     function resetBristles() {
       // On placement fibres are vertical.  Movement thereafter is not faked:
@@ -157,14 +163,17 @@
         const hair = hairs[h], root = rootPosition(hair, brush.x, brush.y, brush.rootZ), start = h * NODES;
         for (let n = 0; n < NODES; n++) {
           const t = n / (NODES - 1);
-          const naturalZ = root.z - hair.length * t;
+          // Root-to-tip direction is back and down: the handle leans 30° forward.
+          const naturalX = root.x - brush.dirX * TILT_SIN * hair.length * t;
+          const naturalY = root.y - brush.dirY * TILT_SIN * hair.length * t;
+          const naturalZ = root.z - TILT_COS * hair.length * t;
           const j = start + n;
           // A stationary press must not arbitrarily choose a radial escape route.
           // Fibres begin vertically beneath their own roots.  Only a later handle
           // movement supplies a horizontal force, so the ensuing bend has the
           // physically correct, opposite-to-travel direction rather than a ring.
-          px[j] = ox[j] = root.x;
-          py[j] = oy[j] = root.y;
+          px[j] = ox[j] = naturalX;
+          py[j] = oy[j] = naturalY;
           pz[j] = oz[j] = Math.max(PAPER_Z, naturalZ);
         }
         wasWet[h] = 0;
@@ -324,7 +333,21 @@
       const speed = distance / elapsed; // CSS pixels per millisecond
       const inputPressure = pressureFromContact(sample, size);
       setBrushHeight(inputPressure, speed);
-      if (distance > .35) brush.drawEnabled = true;
+      if (distance > .35) {
+        const directionX = dx / distance, directionY = dy / distance;
+        if (!brush.hasDirection) {
+          brush.dirX = directionX; brush.dirY = directionY; brush.hasDirection = true;
+          // No ink has been deposited yet, so establish the inclined rest shape now.
+          resetBristles();
+        } else {
+          // Directional inertia keeps the virtual handle from snapping at corners.
+          brush.dirX += (directionX - brush.dirX) * .28;
+          brush.dirY += (directionY - brush.dirY) * .28;
+          const length = Math.hypot(brush.dirX, brush.dirY) || 1;
+          brush.dirX /= length; brush.dirY /= length;
+        }
+        brush.drawEnabled = true;
+      }
 
       // Fill sparse PointerEvents with physical substeps, rather than stamping
       // the 500 tips only at event positions during a fast gesture.
@@ -357,6 +380,7 @@
       activePointer = e.pointerId;
       brush.x = e.clientX; brush.y = e.clientY; brush.minSize = size; brush.nativePressureSeen = false;
       brush.inputX = e.clientX; brush.inputY = e.clientY; brush.inputTime = e.timeStamp;
+      brush.dirX = 0; brush.dirY = -1; brush.hasDirection = false;
       setBrushHeight(pressureFromContact(e, size), 0);
       brush.active = true; brush.drawEnabled = false; resetBristles();
       say('毛の物理計算で描画中', 1050);
