@@ -46,9 +46,9 @@
       <h2>書き中</h2>
       <label class="balance-row"><span>筆圧</span><input id="write-balance" type="range" min="0" max="100" value="30"><span>押半径</span></label>
       <label class="single-row"><span>太さ</span><input id="thickness" type="range" min="0" max="100" value="50"></label>
-      <label class="single-row"><span>早細さ</span><input id="speed-thinness" type="range" min="0" max="100" value="70"></label>
+      <label class="single-row"><span>早細さ</span><input id="speed-thinness" type="range" min="0" max="100" value="85"></label>
       <label class="single-row"><span>筆角度</span><span class="angle-control"><input id="brush-angle" type="range" min="0" max="90" value="25"><span class="range-ends"><span>0° 垂直</span><span>90° 進行方向</span></span></span></label>
-      <label class="single-row"><span>ハライ</span><span class="angle-control"><input id="harai-duration" type="range" min="0" max="100" value="100"><span class="range-ends"><span>0秒</span><span>1秒</span></span></span></label>
+      <label class="single-row"><span>ハライ</span><span class="angle-control"><input id="harai-duration" type="range" min="0" max="100" value="30"><span class="range-ends"><span>0秒</span><span>1秒</span></span></span></label>
       <label class="check-row"><input id="final-recompute" type="checkbox" checked><span>最後に再計算</span></label>
     </div>
     <button id="blank-paper" type="button">白紙</button>
@@ -99,6 +99,7 @@
       // Only the central fibres are longest; length decreases smoothly to the rim.
       const center = Math.pow(1 - radius, .72);
       return {
+        bundleRadius: radius,
         rootX: Math.cos(angle) * radius * ROOT_RADIUS,
         rootY: Math.sin(angle) * radius * ROOT_RADIUS,
         // A pointed brush: long compliant central hairs, short firmer outside hairs.
@@ -146,8 +147,8 @@
       startBalance: 1,
       writeBalance: .30,
       thickness: 1,
-      speedThinness: .70,
-      haraiDuration: 1,
+      speedThinness: .85,
+      haraiDuration: .30,
       finalRecompute: true,
       tiltAngle: 25 * Math.PI / 180,
       tiltSin: Math.sin(25 * Math.PI / 180),
@@ -443,7 +444,12 @@
         // still be physically trailing on the paper, but no longer receive enough
         // ink transfer; the long central hairs therefore form a pointed harai.
         const hasVerticalSupport = hairs[h].length >= brush.rootZ - .5;
-        if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport) {
+        // Static friction can leave outer tips touching after the handle lifts.
+        // Pressure therefore also gates ink supply radially: at zero only the
+        // central few fibres can mark, producing a genuinely pointed finish.
+        const suppliedBundleRadius = .025 + Math.pow(brush.pressure, .72) * .975;
+        const hasInkSupply = hairs[h].bundleRadius <= suppliedBundleRadius;
+        if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport && hasInkSupply) {
           if (wasWet[h]) {
             const dx = px[tip] - lastInkX[h], dy = py[tip] - lastInkY[h];
             // A zero-length Canvas stroke still paints its round cap as a dot.
