@@ -69,9 +69,9 @@
         length: (42 + 76 * center) * LENGTH_SCALE,
         segment: (42 + 76 * center) * LENGTH_SCALE / (NODES - 1),
         // Slight individual differences prevent all hairs from bending in lockstep.
-        damping: Math.min(.82, (.68 + .09 * center) * individuality),
+        damping: Math.min(.74, (.58 + .08 * center) * individuality),
         gravity: .30 * individuality,
-        bendStiffness: Math.min(.52, .42 * individuality),
+        bendStiffness: Math.min(.38, .30 * individuality),
         // Very small tangential velocity after paper collision = a tip that stays put.
         slip: (.002 + .012 * center) / individuality
       };
@@ -230,11 +230,14 @@
             const dx = px[c] - px[a], dy = py[c] - py[a], dz = pz[c] - pz[a];
             const distance = Math.hypot(dx, dy, dz) || .0001;
             const correction = (distance - hair.segment * 2) / distance * hair.bendStiffness;
+            // The bundle stays coherent in depth, but each fibre is supple in the
+            // paper plane (left/right and fore/aft) like a wet, soft brush.
+            const planarCorrection = correction * .30;
             if (n === 0) {
-              px[c] -= dx * correction; py[c] -= dy * correction; pz[c] -= dz * correction;
+              px[c] -= dx * planarCorrection; py[c] -= dy * planarCorrection; pz[c] -= dz * correction;
             } else {
-              px[a] += dx * correction * .5; py[a] += dy * correction * .5; pz[a] += dz * correction * .5;
-              px[c] -= dx * correction * .5; py[c] -= dy * correction * .5; pz[c] -= dz * correction * .5;
+              px[a] += dx * planarCorrection * .5; py[a] += dy * planarCorrection * .5; pz[a] += dz * correction * .5;
+              px[c] -= dx * planarCorrection * .5; py[c] -= dy * planarCorrection * .5; pz[c] -= dz * correction * .5;
             }
           }
         }
@@ -308,6 +311,14 @@
           } else {
             px[tip] = anchorX[h]; py[tip] = anchorY[h];
           }
+          // Even at a sharp turn, a tip must never get ahead of the immediately
+          // travelling handle.  It may remain behind, but cannot draw a forward hook.
+          const root = rootPosition(hairs[h], brush.x, brush.y, brush.rootZ);
+          const ahead = (px[tip] - root.x) * brush.lastMoveX + (py[tip] - root.y) * brush.lastMoveY;
+          if (ahead > 0) {
+            px[tip] -= brush.lastMoveX * ahead; py[tip] -= brush.lastMoveY * ahead;
+            anchorX[h] = px[tip]; anchorY[h] = py[tip];
+          }
           ox[tip] = px[tip]; oy[tip] = py[tip];
         }
       }
@@ -341,7 +352,8 @@
         ctx.globalAlpha = 1;
         ctx.strokeStyle = ink;
         // 500本へ減らした分、各毛は以前より太く描く。
-        ctx.lineWidth = HAIR_STROKE_WIDTH;
+        // More pressure carries a wetter, slightly wider individual ink thread.
+        ctx.lineWidth = HAIR_STROKE_WIDTH * (1 + brush.pressure * .45);
         ctx.stroke();
       }
       // At an extreme press the root-side of the bundle also reaches the wet
