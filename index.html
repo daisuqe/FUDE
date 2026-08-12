@@ -596,7 +596,7 @@
         return { ...state, pressure: pressureSum / weightSum };
       });
     }
-    function redrawRecordedStroke(endTime, haraiDuration) {
+    function redrawRecordedStroke(haraiDuration) {
       if (!strokeSnapshot || !strokeStart || !strokeRecords.length) return;
       replayingStroke = true;
       ctx.putImageData(strokeSnapshot, 0, 0);
@@ -605,7 +605,9 @@
       resetBristles();
 
       const replayRecords = smoothRecordedPressures(strokeRecords);
-      const replayEnd = Math.max(endTime, replayRecords[replayRecords.length - 1].time);
+      // Harai belongs to the final moving part of the stroke. Do not consume its
+      // duration on stationary frames between the last move and pointer release.
+      const replayEnd = replayRecords[replayRecords.length - 1].time;
       const taperDurationMs = haraiDuration * 1000;
       const taperStart = replayEnd - taperDurationMs;
       let haraiBasePressure = 0;
@@ -641,14 +643,14 @@
     function discardStrokeHistory() {
       strokeSnapshot = null; strokeStart = null; strokeRecords = [];
     }
-    function calculateFinalStroke(endTime, haraiDuration) {
+    function calculateFinalStroke(haraiDuration) {
       waitingOverlay.hidden = false;
       document.body.setAttribute('aria-busy', 'true');
       // Give the browser a frame to paint the waiting layer before synchronous
       // physics replay occupies the main thread.
       requestAnimationFrame(() => requestAnimationFrame(() => {
         try {
-          redrawRecordedStroke(endTime, haraiDuration);
+          redrawRecordedStroke(haraiDuration);
         } finally {
           waitingOverlay.hidden = true;
           document.body.removeAttribute('aria-busy');
@@ -732,7 +734,8 @@
     }
     function frame(now) {
       if (brush.active && !replayingStroke) {
-        recordBrushState(now);
+        // Pointer/coalesced samples carry actual motion. Recording idle animation
+        // frames here would spend the harai interval at one fixed endpoint.
         if (!brushSettings.finalRecompute) simulate();
       }
       requestAnimationFrame(frame);
@@ -786,10 +789,7 @@
         const needsReplay = brushSettings.finalRecompute || brushSettings.haraiDuration > 0;
         if (e.type === 'pointerup' && brush.drawEnabled && needsReplay) {
           brush.active = false;
-          calculateFinalStroke(
-            Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now(),
-            brushSettings.haraiDuration
-          );
+          calculateFinalStroke(brushSettings.haraiDuration);
         } else {
           brush.active = false; brush.drawEnabled = false;
           if (e.type === 'pointercancel' && brushSettings.finalRecompute && strokeSnapshot) {
