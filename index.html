@@ -63,7 +63,7 @@
     const notice = document.querySelector('#notice');
     const settingsPanel = document.querySelector('#settings');
     const waitingOverlay = document.querySelector('#waiting');
-    const HAIR_COUNT = 500;
+    const HAIR_COUNT = 250;
     const NODES = 5;                 // 根元 + 4節。各節を3Dで計算する。
     const PARTICLES = HAIR_COUNT * NODES;
     const PAPER_Z = 0;
@@ -518,7 +518,7 @@
         // Fully loaded, wet black ink: density is not tied to pressure.
         ctx.globalAlpha = 1;
         ctx.strokeStyle = ink;
-        // 500本へ減らした分、各毛は以前より太く描く。
+        // 少ない毛でも濡れた毛束として連続して見える太さで描く。
         // More pressure carries a wetter, slightly wider individual ink thread.
         ctx.lineCap = brush.inkTaper < .999 ? 'butt' : 'round';
         ctx.lineWidth = HAIR_STROKE_WIDTH * brushSettings.thickness
