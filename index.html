@@ -141,7 +141,7 @@
       rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false,
       inputX: 0, inputY: 0, inputTime: 0, dirX: 0, dirY: -1, hasDirection: false,
       sensorPressure: 0, startedAt: 0, releasing: false, releaseStartedAt: 0,
-      lastMoveX: 0, lastMoveY: 1, turnStrength: 0
+      lastMoveX: 0, lastMoveY: 1, turnStrength: 0, inkTaper: 1
     };
     const brushSettings = {
       startBalance: 1,
@@ -436,6 +436,30 @@
       }
     }
     function depositInk() {
+      if (brush.inkTaper <= .012) {
+        wasWet.fill(0);
+        return;
+      }
+      // Find the actual centre of the currently contacting physical tips. The
+      // harai envelope must shrink around this point, not around root indices.
+      let centreX = 0, centreY = 0, contactCount = 0;
+      for (let h = 0; h < HAIR_COUNT; h++) {
+        const tip = h * NODES + NODES - 1;
+        const hasVerticalSupport = hairs[h].length >= brush.rootZ - .5;
+        if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport) {
+          centreX += px[tip]; centreY += py[tip]; contactCount++;
+        }
+      }
+      if (!contactCount) { wasWet.fill(0); return; }
+      centreX /= contactCount; centreY /= contactCount;
+      let physicalRadius = .001;
+      for (let h = 0; h < HAIR_COUNT; h++) {
+        const tip = h * NODES + NODES - 1;
+        if (pz[tip] <= PAPER_Z + .08) {
+          physicalRadius = Math.max(physicalRadius, Math.hypot(px[tip] - centreX, py[tip] - centreY));
+        }
+      }
+      const inkEnvelope = physicalRadius * Math.pow(brush.inkTaper, 1.55);
       ctx.beginPath();
       let any = false;
       for (let h = 0; h < HAIR_COUNT; h++) {
@@ -444,11 +468,7 @@
         // still be physically trailing on the paper, but no longer receive enough
         // ink transfer; the long central hairs therefore form a pointed harai.
         const hasVerticalSupport = hairs[h].length >= brush.rootZ - .5;
-        // Static friction can leave outer tips touching after the handle lifts.
-        // Pressure therefore also gates ink supply radially: at zero only the
-        // central few fibres can mark, producing a genuinely pointed finish.
-        const suppliedBundleRadius = .025 + Math.pow(brush.pressure, .72) * .975;
-        const hasInkSupply = hairs[h].bundleRadius <= suppliedBundleRadius;
+        const hasInkSupply = Math.hypot(px[tip] - centreX, py[tip] - centreY) <= inkEnvelope;
         if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport && hasInkSupply) {
           if (wasWet[h]) {
             const dx = px[tip] - lastInkX[h], dy = py[tip] - lastInkY[h];
@@ -470,12 +490,15 @@
         ctx.strokeStyle = ink;
         // 500本へ減らした分、各毛は以前より太く描く。
         // More pressure carries a wetter, slightly wider individual ink thread.
-        ctx.lineWidth = HAIR_STROKE_WIDTH * brushSettings.thickness * (1 + brush.pressure * .45);
+        ctx.lineCap = brush.inkTaper < .999 ? 'butt' : 'round';
+        ctx.lineWidth = HAIR_STROKE_WIDTH * brushSettings.thickness
+          * (.18 + brush.inkTaper * .82) * (1 + brush.pressure * .45);
         ctx.stroke();
+        ctx.lineCap = 'round';
       }
       // At an extreme press the root-side of the bundle also reaches the wet
       // paper.  Four-times-radius root footprints overlap into one mashed mass.
-      if (brush.rootZ <= ROOT_CONTACT_Z) {
+      if (brush.rootZ <= ROOT_CONTACT_Z && brush.inkTaper >= .92) {
         const rootInkRadius = HAIR_STROKE_WIDTH * brushSettings.thickness * 1.3; // normal radius × (4 × .65)
         ctx.beginPath();
         for (let h = 0; h < HAIR_COUNT; h++) {
