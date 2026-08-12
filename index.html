@@ -476,7 +476,16 @@
             // Do not transfer ink until this individual tip has genuinely moved;
             // otherwise stationary root positions outline the brush as a circle.
             if (dx * dx + dy * dy > .0225) {
-              ctx.moveTo(lastInkX[h], lastInkY[h]); ctx.lineTo(px[tip], py[tip]); any = true;
+              let startX = lastInkX[h], startY = lastInkY[h];
+              if (brush.inkTaper < .999) {
+                const fromCentreX = startX - centreX, fromCentreY = startY - centreY;
+                const startRadius = Math.hypot(fromCentreX, fromCentreY);
+                if (startRadius > inkEnvelope && startRadius > 0) {
+                  startX = centreX + fromCentreX / startRadius * inkEnvelope;
+                  startY = centreY + fromCentreY / startRadius * inkEnvelope;
+                }
+              }
+              ctx.moveTo(startX, startY); ctx.lineTo(px[tip], py[tip]); any = true;
             }
           }
           lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 1;
