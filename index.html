@@ -51,6 +51,8 @@
     const ox = new Float32Array(PARTICLES), oy = new Float32Array(PARTICLES), oz = new Float32Array(PARTICLES);
     const lastInkX = new Float32Array(HAIR_COUNT), lastInkY = new Float32Array(HAIR_COUNT);
     const wasWet = new Uint8Array(HAIR_COUNT);
+    const anchorX = new Float32Array(HAIR_COUNT), anchorY = new Float32Array(HAIR_COUNT);
+    const tipAnchored = new Uint8Array(HAIR_COUNT);
     const hairs = Array.from({ length: HAIR_COUNT }, (_, i) => {
       // Deliberately random root positions make the individual fibres visible,
       // unlike a mathematically even spiral distribution.
@@ -71,7 +73,7 @@
         gravity: .30 * individuality,
         bendStiffness: Math.min(.52, .42 * individuality),
         // Very small tangential velocity after paper collision = a tip that stays put.
-        slip: (.012 + .065 * center) / individuality
+        slip: (.002 + .012 * center) / individuality
       };
     });
     // Liquid bridges link nearby hairs.  Links have a slack limit rather than a
@@ -180,6 +182,7 @@
           pz[j] = oz[j] = Math.max(PAPER_Z, naturalZ);
         }
         wasWet[h] = 0;
+        tipAnchored[h] = 0;
       }
     }
 
@@ -246,6 +249,9 @@
               ox[j] = px[j] - (px[j] - ox[j]) * hair.slip;
               oy[j] = py[j] - (py[j] - oy[j]) * hair.slip;
               oz[j] = pz[j];
+              if (n === NODES - 1 && !tipAnchored[h]) {
+                anchorX[h] = px[j]; anchorY[h] = py[j]; tipAnchored[h] = 1;
+              }
             }
           }
         }
@@ -284,6 +290,25 @@
               ox[j] = px[j]; oy[j] = py[j];
             }
           }
+        }
+        // Static friction: a wet tip initially pins to its first paper contact.
+        // Only sustained bending beyond this small yield limit lets the anchor creep.
+        for (let h = 0; h < HAIR_COUNT; h++) {
+          const tip = h * NODES + NODES - 1;
+          if (pz[tip] > PAPER_Z + .08) { tipAnchored[h] = 0; continue; }
+          if (!tipAnchored[h]) { anchorX[h] = px[tip]; anchorY[h] = py[tip]; tipAnchored[h] = 1; }
+          const dx = px[tip] - anchorX[h], dy = py[tip] - anchorY[h];
+          const distance = Math.hypot(dx, dy);
+          const yieldDistance = .18 + brush.pressure * .85;
+          if (distance > yieldDistance) {
+            const creep = (distance - yieldDistance) / distance * .018;
+            anchorX[h] += dx * creep; anchorY[h] += dy * creep;
+            px[tip] = anchorX[h] + dx / distance * yieldDistance;
+            py[tip] = anchorY[h] + dy / distance * yieldDistance;
+          } else {
+            px[tip] = anchorX[h]; py[tip] = anchorY[h];
+          }
+          ox[tip] = px[tip]; oy[tip] = py[tip];
         }
       }
     }
