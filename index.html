@@ -136,12 +136,12 @@
       const absolute = Math.max(0, Math.min(1, (size - 2) / 24));
       const relative = Math.max(0, Math.min(1, (size - brush.minSize) / Math.max(1.1, brush.minSize * .10)));
       const areaPressure = Math.max(absolute, relative);
-      // Calculate both signals.  Either a strong force reading or a large contact
-      // patch is enough to register a hard press, preventing maximum pressure
-      // from being lost merely because the other sensor has a smaller range.
-      const forcePressure = suppliedPressure ?? 0;
-      const hardSignal = Math.max(forcePressure, areaPressure);
-      const normalized = Math.max(0, Math.min(1, (hardSignal - .10) / .80));
+      // Both signals must agree: use the weaker one.  Therefore, reducing either
+      // physical pressure or finger contact immediately begins a thinner stroke.
+      const combinedPressure = suppliedPressure === null
+        ? areaPressure
+        : Math.min(suppliedPressure, areaPressure);
+      const normalized = Math.max(0, Math.min(1, (combinedPressure - .10) / .80));
       return Math.max(.008, Math.pow(normalized, 1.65));
     }
     function rootPosition(hair, x, y, z) { return { x: x + hair.rootX, y: y + hair.rootY, z }; }
