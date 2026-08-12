@@ -541,13 +541,14 @@
         time: Number.isFinite(now) ? now : performance.now()
       });
     }
-    function applyRecordedState(state, pressureScale = 1, pressureOverride = null) {
+    function applyRecordedState(state, pressureScale = 1, pressureOverride = null, inkTaper = 1) {
       brush.x = state.x; brush.y = state.y;
       brush.pressure = pressureOverride === null ? state.pressure * pressureScale : pressureOverride;
       brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
       brush.dirX = state.dirX; brush.dirY = state.dirY; brush.hasDirection = state.hasDirection;
       brush.lastMoveX = state.lastMoveX; brush.lastMoveY = state.lastMoveY;
       brush.turnStrength = state.turnStrength; brush.drawEnabled = state.drawEnabled;
+      brush.inkTaper = inkTaper;
     }
     function redrawRecordedStroke(endTime, haraiDuration) {
       if (!strokeSnapshot || !strokeStart || !strokeRecords.length) return;
@@ -583,7 +584,7 @@
         const syntheticPressure = taperDurationMs > 0 && remainingMs < taperDurationMs
           ? haraiBasePressure * harai
           : null;
-        applyRecordedState(state, 1, syntheticPressure);
+        applyRecordedState(state, 1, syntheticPressure, taperDurationMs > 0 ? harai : 1);
         simulate();
       }
       brush.active = false; brush.drawEnabled = false; brush.releasing = false;
@@ -714,6 +715,7 @@
       brush.startedAt = performance.now(); brush.releasing = false;
       brush.lastMoveX = 0; brush.lastMoveY = 1;
       brush.turnStrength = 0;
+      brush.inkTaper = 1;
       previewX = brush.x; previewY = brush.y; previewReady = false;
       setBrushHeight(pressureFromContact(e, size), 0);
       brush.active = true; brush.drawEnabled = false;
