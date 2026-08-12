@@ -142,11 +142,12 @@
       const absolute = Math.max(0, Math.min(1, (size - 2) / 24));
       const relative = Math.max(0, Math.min(1, (size - brush.minSize) / Math.max(1.1, brush.minSize * .10)));
       const areaPressure = Math.max(absolute, relative);
-      // Both signals must agree: use the weaker one.  Therefore, reducing either
-      // physical pressure or finger contact immediately begins a thinner stroke.
+      // Use a lower-biased average instead of a hard minimum.  It still responds
+      // when either signal weakens, but one noisy sensor no longer makes the entry
+      // of a stroke collapse to an unnaturally thin line.
       const combinedPressure = suppliedPressure === null
         ? areaPressure
-        : Math.min(suppliedPressure, areaPressure);
+        : Math.min(suppliedPressure, areaPressure) * .60 + Math.max(suppliedPressure, areaPressure) * .40;
       const normalized = Math.max(0, Math.min(1, (combinedPressure - .10) / .80));
       return Math.max(.008, Math.pow(normalized, 1.65));
     }
@@ -260,6 +261,28 @@
             px[b] -= dx * correction; py[b] -= dy * correction;
           }
         }
+        // The handle is tilted forward, so bristles can trail backward but must
+        // not curl far to either side.  This is a narrow directional guide, not a
+        // drawn shape: root offsets still provide the full brush width.
+        const sideX = -brush.dirY, sideY = brush.dirX;
+        for (let h = 0; h < HAIR_COUNT; h++) {
+          const hair = hairs[h], root = rootPosition(hair, brush.x, brush.y, brush.rootZ), start = h * NODES;
+          for (let n = 1; n < NODES; n++) {
+            const j = start + n, fraction = n / (NODES - 1);
+            const dx = px[j] - root.x, dy = py[j] - root.y;
+            const along = dx * brush.dirX + dy * brush.dirY;
+            const side = dx * sideX + dy * sideY;
+            const sideLimit = (1.0 + 2.2 * brush.pressure) * fraction;
+            const guidedAlong = Math.min(along, 0);
+            const guidedSide = Math.max(-sideLimit, Math.min(sideLimit, side));
+            if (guidedAlong !== along || guidedSide !== side) {
+              px[j] = root.x + brush.dirX * guidedAlong + sideX * guidedSide;
+              py[j] = root.y + brush.dirY * guidedAlong + sideY * guidedSide;
+              // Remove the lateral Verlet velocity that would otherwise create a loop next pass.
+              ox[j] = px[j]; oy[j] = py[j];
+            }
+          }
+        }
       }
     }
     function depositInk() {
@@ -320,7 +343,8 @@
       // Pressure/contact area already produce a nonlinear value.  A second curve
       // makes a light touch visibly finer, while speed lifts the whole brush.
       const contactPressure = Math.pow(inputPressure, 1.35);
-      const speedLift = Math.min(.78, speed * .34);
+      // Normal writing speed retains a firm entry; only genuinely fast flicks lift.
+      const speedLift = Math.min(.72, Math.max(0, speed - .65) * .32);
       brush.pressure = contactPressure * (1 - speedLift);
       brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
     }
