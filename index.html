@@ -23,8 +23,12 @@
     .single-row { display: grid; grid-template-columns: 4.5em minmax(80px, 1fr); gap: 8px; align-items: center; margin-top: 12px; font-size: 13px; font-weight: 700; }
     .angle-control { display: grid; gap: 1px; }
     .range-ends { display: flex; justify-content: space-between; color: #746657; font-size: 10px; font-weight: 400; }
+    .check-row { display: flex; align-items: center; gap: 9px; margin-top: 14px; font-size: 13px; font-weight: 700; }
+    .check-row input { width: 20px; height: 20px; accent-color: #34271c; }
     #settings input[type="range"] { width: 100%; accent-color: #34271c; touch-action: pan-x; }
     #blank-paper { width: 100%; margin-top: 7px; padding: 11px; border: 1px solid rgba(50,39,27,.3); border-radius: 9px; background: #fffaf0; color: #2e261e; font: inherit; font-weight: 700; }
+    #waiting { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: rgba(17,14,11,.62); color: #fffaf0; font-size: 22px; font-weight: 700; letter-spacing: .3em; }
+    #waiting[hidden] { display: none; }
     #rotate { display: none; position: fixed; inset: 0; z-index: 4; align-items: center; justify-content: center; background: #e9e1d2; color: #302820; font-size: 16px; text-align: center; line-height: 2; }
     @media (orientation: landscape) { #rotate { display: flex; } }
   </style>
@@ -44,9 +48,11 @@
       <label class="single-row"><span>太さ</span><input id="thickness" type="range" min="0" max="100" value="50"></label>
       <label class="single-row"><span>早細さ</span><input id="speed-thinness" type="range" min="0" max="100" value="70"></label>
       <label class="single-row"><span>筆角度</span><span class="angle-control"><input id="brush-angle" type="range" min="0" max="90" value="25"><span class="range-ends"><span>0° 垂直</span><span>90° 進行方向</span></span></span></label>
+      <label class="check-row"><input id="harai-enabled" type="checkbox" checked><span>ハライ</span></label>
     </div>
     <button id="blank-paper" type="button">白紙</button>
   </section>
+  <div id="waiting" role="status" aria-live="polite" hidden>待機</div>
   <div id="rotate">縦向きにしてから<br>毛筆をお使いください</div>
   <script>
   (() => {
@@ -55,6 +61,7 @@
     const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     const notice = document.querySelector('#notice');
     const settingsPanel = document.querySelector('#settings');
+    const waitingOverlay = document.querySelector('#waiting');
     const HAIR_COUNT = 500;
     const NODES = 5;                 // 根元 + 4節。各節を3Dで計算する。
     const PARTICLES = HAIR_COUNT * NODES;
@@ -138,6 +145,7 @@
       writeBalance: .30,
       thickness: 1,
       speedThinness: .70,
+      haraiEnabled: true,
       tiltAngle: 25 * Math.PI / 180,
       tiltSin: Math.sin(25 * Math.PI / 180),
       tiltCos: Math.cos(25 * Math.PI / 180)
@@ -157,6 +165,9 @@
       brushSettings.tiltAngle = value * Math.PI / 180;
       brushSettings.tiltSin = Math.sin(brushSettings.tiltAngle);
       brushSettings.tiltCos = Math.cos(brushSettings.tiltAngle);
+    });
+    document.querySelector('#harai-enabled').addEventListener('change', e => {
+      brushSettings.haraiEnabled = e.currentTarget.checked;
     });
     document.querySelector('#settings-close').addEventListener('click', () => { settingsPanel.hidden = true; });
     document.querySelector('#blank-paper').addEventListener('click', () => {
@@ -493,9 +504,9 @@
         time: Number.isFinite(now) ? now : performance.now()
       });
     }
-    function applyRecordedState(state, pressureScale = 1) {
+    function applyRecordedState(state, pressureScale = 1, pressureOverride = null) {
       brush.x = state.x; brush.y = state.y;
-      brush.pressure = state.pressure * pressureScale;
+      brush.pressure = pressureOverride === null ? state.pressure * pressureScale : pressureOverride;
       brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
       brush.dirX = state.dirX; brush.dirY = state.dirY; brush.hasDirection = state.hasDirection;
       brush.lastMoveX = state.lastMoveX; brush.lastMoveY = state.lastMoveY;
@@ -510,16 +521,52 @@
       resetBristles();
 
       const replayEnd = Math.max(endTime, strokeRecords[strokeRecords.length - 1].time);
+      const taperStart = replayEnd - 1000;
+      let haraiBasePressure = 0;
+      let foundBeforeTaper = false;
+      for (const state of strokeRecords) {
+        if (!state.drawEnabled) continue;
+        if (state.time <= taperStart) {
+          haraiBasePressure = state.pressure;
+          foundBeforeTaper = true;
+        } else if (!foundBeforeTaper) {
+          // For a stroke shorter than one second, use its first drawable pressure.
+          haraiBasePressure = state.pressure;
+          break;
+        } else {
+          break;
+        }
+      }
       for (const state of strokeRecords) {
         const secondsRemaining = (replayEnd - state.time) / 1000;
         const linear = Math.max(0, Math.min(1, secondsRemaining));
         const harai = linear * linear * (3 - 2 * linear); // smooth 1 → 0 over the final second
-        applyRecordedState(state, harai);
+        // During the final second, ignore live pressure/contact-radius readings.
+        // Only the synthetic lift from the one-second boundary is used.
+        const syntheticPressure = secondsRemaining < 1 ? haraiBasePressure * harai : null;
+        applyRecordedState(state, 1, syntheticPressure);
         simulate();
       }
       brush.active = false; brush.drawEnabled = false; brush.releasing = false;
       replayingStroke = false;
       strokeSnapshot = null; strokeStart = null; strokeRecords = [];
+    }
+    function discardStrokeHistory() {
+      strokeSnapshot = null; strokeStart = null; strokeRecords = [];
+    }
+    function calculateHaraiAfterPaint(endTime) {
+      waitingOverlay.hidden = false;
+      document.body.setAttribute('aria-busy', 'true');
+      // Give the browser a frame to paint the waiting layer before synchronous
+      // physics replay occupies the main thread.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        try {
+          redrawStrokeWithHarai(endTime);
+        } finally {
+          waitingOverlay.hidden = true;
+          document.body.removeAttribute('aria-busy');
+        }
+      }));
     }
     function setBrushHeight(inputPressure, speed, now = performance.now()) {
       // Pressure/contact area already produce a nonlinear value.  A second curve
@@ -627,12 +674,12 @@
       cancelClear();
       if (activePointer === e.pointerId) {
         activePointer = null;
-        if (e.type === 'pointerup' && brush.drawEnabled) {
+        if (e.type === 'pointerup' && brush.drawEnabled && brushSettings.haraiEnabled) {
           brush.active = false;
-          redrawStrokeWithHarai(Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now());
+          calculateHaraiAfterPaint(Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now());
         } else {
           brush.active = false; brush.drawEnabled = false;
-          strokeSnapshot = null; strokeStart = null; strokeRecords = [];
+          discardStrokeHistory();
         }
       }
     }
