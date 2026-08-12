@@ -113,6 +113,7 @@
         slip: (.002 + .012 * center) / individuality
       };
     });
+    const MAX_HAIR_LENGTH = Math.max(...hairs.map(hair => hair.length));
     // Liquid bridges link nearby hairs.  Links have a slack limit rather than a
     // rigid length, so normal strokes stay together and hard presses can fan out.
     const liquidLinks = (() => {
@@ -233,6 +234,13 @@
         : suppliedPressure * (1 - radiusWeight) + areaPressure * radiusWeight;
       const normalized = Math.max(0, Math.min(1, (combinedPressure - .10) / .80));
       return Math.max(.008, Math.pow(normalized, 1.65));
+    }
+    function rootHeightForPressure(pressure) {
+      const requestedHeight = 116 * (1 - pressure) * LENGTH_SCALE;
+      // Speed thinning may lift the bundle, but never beyond the reach of its
+      // longest central fibre. This keeps a continuous hairline on the paper.
+      const centralContactHeight = Math.max(0, MAX_HAIR_LENGTH * brushSettings.tiltCos - .35);
+      return Math.min(requestedHeight, centralContactHeight);
     }
     function rootPosition(hair, x, y, z) {
       // Root plane is perpendicular to the menu-controlled tilted brush axis.
@@ -436,10 +444,6 @@
       }
     }
     function depositInk() {
-      if (brush.inkTaper <= .012) {
-        wasWet.fill(0);
-        return;
-      }
       // Find the actual centre of the currently contacting physical tips. The
       // harai envelope must shrink around this point, not around root indices.
       let centreX = 0, centreY = 0, contactCount = 0;
@@ -453,13 +457,17 @@
       if (!contactCount) { wasWet.fill(0); return; }
       centreX /= contactCount; centreY /= contactCount;
       let physicalRadius = .001;
+      let closestTip = -1, closestDistance = Infinity;
       for (let h = 0; h < HAIR_COUNT; h++) {
         const tip = h * NODES + NODES - 1;
         if (pz[tip] <= PAPER_Z + .08) {
-          physicalRadius = Math.max(physicalRadius, Math.hypot(px[tip] - centreX, py[tip] - centreY));
+          const distance = Math.hypot(px[tip] - centreX, py[tip] - centreY);
+          physicalRadius = Math.max(physicalRadius, distance);
+          if (distance < closestDistance) { closestDistance = distance; closestTip = h; }
         }
       }
-      const inkEnvelope = physicalRadius * Math.pow(brush.inkTaper, 1.55);
+      const effectiveTaper = Math.max(.018, brush.inkTaper);
+      const inkEnvelope = physicalRadius * Math.pow(effectiveTaper, 1.55);
       ctx.beginPath();
       let any = false;
       for (let h = 0; h < HAIR_COUNT; h++) {
@@ -468,7 +476,8 @@
         // still be physically trailing on the paper, but no longer receive enough
         // ink transfer; the long central hairs therefore form a pointed harai.
         const hasVerticalSupport = hairs[h].length >= brush.rootZ - .5;
-        const hasInkSupply = Math.hypot(px[tip] - centreX, py[tip] - centreY) <= inkEnvelope;
+        const hasInkSupply = Math.hypot(px[tip] - centreX, py[tip] - centreY) <= inkEnvelope
+          || (brush.inkTaper < .08 && h === closestTip);
         if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport && hasInkSupply) {
           if (wasWet[h]) {
             const dx = px[tip] - lastInkX[h], dy = py[tip] - lastInkY[h];
@@ -553,7 +562,7 @@
     function applyRecordedState(state, pressureScale = 1, pressureOverride = null, inkTaper = 1) {
       brush.x = state.x; brush.y = state.y;
       brush.pressure = pressureOverride === null ? state.pressure * pressureScale : pressureOverride;
-      brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
+      brush.rootZ = rootHeightForPressure(brush.pressure);
       brush.dirX = state.dirX; brush.dirY = state.dirY; brush.hasDirection = state.hasDirection;
       brush.lastMoveX = state.lastMoveX; brush.lastMoveY = state.lastMoveY;
       brush.turnStrength = state.turnStrength; brush.drawEnabled = state.drawEnabled;
@@ -643,12 +652,12 @@
       // Normal writing speed retains a firm entry; only genuinely fast flicks lift.
       const speedSensitivity = brushSettings.speedThinness;
       const speedThreshold = 1.05 - speedSensitivity * .80;
-      const speedLift = Math.min(.86, Math.max(0, speed - speedThreshold) * (.10 + speedSensitivity * .70));
+      const speedLift = Math.min(.82, Math.max(0, speed - speedThreshold) * (.10 + speedSensitivity * .70));
       brush.sensorPressure = contactPressure * (1 - speedLift);
       // A deliberate one-second settling makes the start of every stroke soft.
       const entry = Math.max(0, Math.min(1, (now - brush.startedAt) / 1000));
       brush.pressure = brush.sensorPressure * entry;
-      brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
+      brush.rootZ = rootHeightForPressure(brush.pressure);
     }
     function advancePointerSample(sample) {
       const size = contactSize(sample);
