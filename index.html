@@ -49,6 +49,7 @@
       <label class="single-row"><span>早細さ</span><input id="speed-thinness" type="range" min="0" max="100" value="70"></label>
       <label class="single-row"><span>筆角度</span><span class="angle-control"><input id="brush-angle" type="range" min="0" max="90" value="25"><span class="range-ends"><span>0° 垂直</span><span>90° 進行方向</span></span></span></label>
       <label class="check-row"><input id="harai-enabled" type="checkbox" checked><span>ハライ</span></label>
+      <label class="check-row"><input id="final-recompute" type="checkbox" checked><span>最後に再計算</span></label>
     </div>
     <button id="blank-paper" type="button">白紙</button>
   </section>
@@ -73,6 +74,7 @@
     const ROOT_CONTACT_Z = 7;        // The ferrule-side roots are now wetting the paper.
     let dpr = 1, activePointer = null, clearTimer = 0, messageTimer = 0;
     let strokeSnapshot = null, strokeStart = null, strokeRecords = [], replayingStroke = false;
+    let previewX = 0, previewY = 0, previewReady = false;
 
     // Reproducible randomness: natural-looking placement without changing between runs.
     const randomAt = (index, salt) => {
@@ -146,6 +148,7 @@
       thickness: 1,
       speedThinness: .70,
       haraiEnabled: true,
+      finalRecompute: true,
       tiltAngle: 25 * Math.PI / 180,
       tiltSin: Math.sin(25 * Math.PI / 180),
       tiltCos: Math.cos(25 * Math.PI / 180)
@@ -168,6 +171,9 @@
     });
     document.querySelector('#harai-enabled').addEventListener('change', e => {
       brushSettings.haraiEnabled = e.currentTarget.checked;
+    });
+    document.querySelector('#final-recompute').addEventListener('change', e => {
+      brushSettings.finalRecompute = e.currentTarget.checked;
     });
     document.querySelector('#settings-close').addEventListener('click', () => { settingsPanel.hidden = true; });
     document.querySelector('#blank-paper').addEventListener('click', () => {
@@ -239,8 +245,8 @@
       // Project the circular root plane into screen-space. This remains finite at
       // 90°, where the root plane is viewed edge-on.
       return {
-        x: x + sideX * sideOffset + brush.dirX * forwardOffset * brushSettings.tiltCos,
-        y: y + sideY * sideOffset + brush.dirY * forwardOffset * brushSettings.tiltCos,
+        x: x + sideX * sideOffset + brush.dirX * forwardOffset * Math.max(.18, brushSettings.tiltCos),
+        y: y + sideY * sideOffset + brush.dirY * forwardOffset * Math.max(.18, brushSettings.tiltCos),
         z: z - forwardOffset * brushSettings.tiltSin
       };
     }
@@ -367,7 +373,10 @@
             const dx = px[j] - root.x, dy = py[j] - root.y;
             const along = dx * brush.dirX + dy * brush.dirY;
             const side = dx * sideX + dy * sideY;
-            const sideLimit = (1.0 + 2.2 * brush.pressure) * fraction;
+            // A laid-down brush is supported by more of its shaft and therefore
+            // has less lateral freedom. Keep a soft elliptical bundle above 45°.
+            const tiltStability = 1 - brushSettings.tiltSin * .82;
+            const sideLimit = (1.0 + 2.2 * brush.pressure) * fraction * Math.max(.14, tiltStability);
             const guidedAlong = Math.min(along, 0);
             const guidedSide = Math.max(-sideLimit, Math.min(sideLimit, side));
             if (guidedAlong !== along || guidedSide !== side) {
@@ -388,7 +397,8 @@
           const distance = Math.hypot(dx, dy);
           const yieldDistance = .18 + brush.pressure * .85;
           if (distance > yieldDistance) {
-            const creep = (distance - yieldDistance) / distance * .018;
+            const tiltCreep = Math.max(.06, 1 - brushSettings.tiltSin * .92);
+            const creep = (distance - yieldDistance) / distance * .018 * tiltCreep;
             anchorX[h] += dx * creep; anchorY[h] += dy * creep;
             px[tip] = anchorX[h] + dx / distance * yieldDistance;
             py[tip] = anchorY[h] + dy / distance * yieldDistance;
@@ -512,7 +522,7 @@
       brush.lastMoveX = state.lastMoveX; brush.lastMoveY = state.lastMoveY;
       brush.turnStrength = state.turnStrength; brush.drawEnabled = state.drawEnabled;
     }
-    function redrawStrokeWithHarai(endTime) {
+    function redrawRecordedStroke(endTime, applyHarai) {
       if (!strokeSnapshot || !strokeStart || !strokeRecords.length) return;
       replayingStroke = true;
       ctx.putImageData(strokeSnapshot, 0, 0);
@@ -543,7 +553,7 @@
         const harai = linear * linear * (3 - 2 * linear); // smooth 1 → 0 over the final second
         // During the final second, ignore live pressure/contact-radius readings.
         // Only the synthetic lift from the one-second boundary is used.
-        const syntheticPressure = secondsRemaining < 1 ? haraiBasePressure * harai : null;
+        const syntheticPressure = applyHarai && secondsRemaining < 1 ? haraiBasePressure * harai : null;
         applyRecordedState(state, 1, syntheticPressure);
         simulate();
       }
@@ -554,19 +564,38 @@
     function discardStrokeHistory() {
       strokeSnapshot = null; strokeStart = null; strokeRecords = [];
     }
-    function calculateHaraiAfterPaint(endTime) {
+    function calculateFinalStroke(endTime, applyHarai) {
       waitingOverlay.hidden = false;
       document.body.setAttribute('aria-busy', 'true');
       // Give the browser a frame to paint the waiting layer before synchronous
       // physics replay occupies the main thread.
       requestAnimationFrame(() => requestAnimationFrame(() => {
         try {
-          redrawStrokeWithHarai(endTime);
+          redrawRecordedStroke(endTime, applyHarai);
         } finally {
           waitingOverlay.hidden = true;
           document.body.removeAttribute('aria-busy');
         }
       }));
+    }
+    function drawFastPreview(x, y) {
+      if (!brush.drawEnabled) return;
+      // While recording, render only overlapping opaque disks. This preserves a
+      // continuous visual stroke at very low cost; the physical hairs are rebuilt later.
+      const radius = ROOT_RADIUS * brushSettings.thickness * (.10 + brush.pressure * .90);
+      if (!previewReady) { previewX = x; previewY = y; previewReady = true; }
+      const dx = x - previewX, dy = y - previewY;
+      const distance = Math.hypot(dx, dy);
+      const stepSize = Math.max(.8, radius * .45);
+      const steps = Math.max(1, Math.ceil(distance / stepSize));
+      ctx.fillStyle = ink; ctx.globalAlpha = 1;
+      for (let step = 1; step <= steps; step++) {
+        const ratio = step / steps;
+        ctx.beginPath();
+        ctx.arc(previewX + dx * ratio, previewY + dy * ratio, Math.max(.5, radius), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      previewX = x; previewY = y;
     }
     function setBrushHeight(inputPressure, speed, now = performance.now()) {
       // Pressure/contact area already produce a nonlinear value.  A second curve
@@ -619,14 +648,15 @@
         brush.x = brush.inputX + dx * ratio;
         brush.y = brush.inputY + dy * ratio;
         recordBrushState(brush.inputTime + elapsed * ratio);
-        simulate();
+        if (brushSettings.finalRecompute) drawFastPreview(brush.x, brush.y);
+        else simulate();
       }
       brush.inputX = sample.clientX; brush.inputY = sample.clientY; brush.inputTime = sample.timeStamp;
     }
     function frame(now) {
       if (brush.active && !replayingStroke) {
         recordBrushState(now);
-        simulate();
+        if (!brushSettings.finalRecompute) simulate();
       }
       requestAnimationFrame(frame);
     }
@@ -655,6 +685,7 @@
       brush.startedAt = performance.now(); brush.releasing = false;
       brush.lastMoveX = 0; brush.lastMoveY = 1;
       brush.turnStrength = 0;
+      previewX = brush.x; previewY = brush.y; previewReady = false;
       setBrushHeight(pressureFromContact(e, size), 0);
       brush.active = true; brush.drawEnabled = false;
       beginStrokeHistory(e.timeStamp);
@@ -674,11 +705,18 @@
       cancelClear();
       if (activePointer === e.pointerId) {
         activePointer = null;
-        if (e.type === 'pointerup' && brush.drawEnabled && brushSettings.haraiEnabled) {
+        const needsReplay = brushSettings.finalRecompute || brushSettings.haraiEnabled;
+        if (e.type === 'pointerup' && brush.drawEnabled && needsReplay) {
           brush.active = false;
-          calculateHaraiAfterPaint(Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now());
+          calculateFinalStroke(
+            Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now(),
+            brushSettings.haraiEnabled
+          );
         } else {
           brush.active = false; brush.drawEnabled = false;
+          if (e.type === 'pointercancel' && brushSettings.finalRecompute && strokeSnapshot) {
+            ctx.putImageData(strokeSnapshot, 0, 0);
+          }
           discardStrokeHistory();
         }
       }
