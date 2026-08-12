@@ -36,14 +36,14 @@
     <div class="settings-head"><span>筆設定</span><button id="settings-close" type="button" aria-label="設定を閉じる">×</button></div>
     <div class="settings-section">
       <h2>書き始め</h2>
-      <label class="balance-row"><span>筆圧</span><input id="start-balance" type="range" min="0" max="100" value="50"><span>押半径</span></label>
+      <label class="balance-row"><span>筆圧</span><input id="start-balance" type="range" min="0" max="100" value="100"><span>押半径</span></label>
     </div>
     <div class="settings-section">
       <h2>書き中</h2>
-      <label class="balance-row"><span>筆圧</span><input id="write-balance" type="range" min="0" max="100" value="50"><span>押半径</span></label>
+      <label class="balance-row"><span>筆圧</span><input id="write-balance" type="range" min="0" max="100" value="30"><span>押半径</span></label>
       <label class="single-row"><span>太さ</span><input id="thickness" type="range" min="0" max="100" value="50"></label>
-      <label class="single-row"><span>早細さ</span><input id="speed-thinness" type="range" min="0" max="100" value="50"></label>
-      <label class="single-row"><span>筆角度</span><span class="angle-control"><input id="brush-angle" type="range" min="0" max="90" value="30"><span class="range-ends"><span>0° 垂直</span><span>90° 進行方向</span></span></span></label>
+      <label class="single-row"><span>早細さ</span><input id="speed-thinness" type="range" min="0" max="100" value="70"></label>
+      <label class="single-row"><span>筆角度</span><span class="angle-control"><input id="brush-angle" type="range" min="0" max="90" value="25"><span class="range-ends"><span>0° 垂直</span><span>90° 進行方向</span></span></span></label>
     </div>
     <button id="blank-paper" type="button">白紙</button>
   </section>
@@ -65,6 +65,7 @@
     const HAIR_STROKE_WIDTH = 1.28;
     const ROOT_CONTACT_Z = 7;        // The ferrule-side roots are now wetting the paper.
     let dpr = 1, activePointer = null, clearTimer = 0, messageTimer = 0;
+    let strokeSnapshot = null, strokeStart = null, strokeRecords = [], replayingStroke = false;
 
     // Reproducible randomness: natural-looking placement without changing between runs.
     const randomAt = (index, salt) => {
@@ -133,13 +134,13 @@
       lastMoveX: 0, lastMoveY: 1, turnStrength: 0
     };
     const brushSettings = {
-      startBalance: .50,
-      writeBalance: .50,
+      startBalance: 1,
+      writeBalance: .30,
       thickness: 1,
-      speedThinness: .50,
-      tiltAngle: 30 * Math.PI / 180,
-      tiltSin: .5,
-      tiltCos: Math.cos(30 * Math.PI / 180)
+      speedThinness: .70,
+      tiltAngle: 25 * Math.PI / 180,
+      tiltSin: Math.sin(25 * Math.PI / 180),
+      tiltCos: Math.cos(25 * Math.PI / 180)
     };
 
     function bindRange(id, update) {
@@ -176,7 +177,11 @@
       notice.textContent = text; notice.classList.remove('hide');
       clearTimeout(messageTimer); messageTimer = setTimeout(() => notice.classList.add('hide'), time);
     }
-    function clearPaper() { ctx.fillStyle = '#f4eddf'; ctx.fillRect(0, 0, innerWidth, innerHeight); say('紙を新しくしました'); }
+    function clearPaper() {
+      ctx.fillStyle = '#f4eddf'; ctx.fillRect(0, 0, innerWidth, innerHeight);
+      strokeSnapshot = null; strokeStart = null; strokeRecords = [];
+      say('紙を新しくしました');
+    }
     function contactSize(e) {
       const w = Number(e.width), h = Number(e.height);
       if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 1.25 || h <= 1.25) return null;
@@ -466,6 +471,56 @@
       }
       brush.turnStrength *= .78;
     }
+    function beginStrokeHistory(now) {
+      // Preserve the paper exactly as it was before this stroke. The finished
+      // stroke can then be rebuilt with a one-second pressure taper at its end.
+      strokeSnapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      strokeRecords = [];
+      strokeStart = {
+        x: brush.x, y: brush.y, pressure: brush.pressure, rootZ: brush.rootZ,
+        dirX: brush.dirX, dirY: brush.dirY, hasDirection: brush.hasDirection,
+        lastMoveX: brush.lastMoveX, lastMoveY: brush.lastMoveY,
+        turnStrength: brush.turnStrength, drawEnabled: false, time: now
+      };
+    }
+    function recordBrushState(now) {
+      if (replayingStroke || !strokeStart) return;
+      strokeRecords.push({
+        x: brush.x, y: brush.y, pressure: brush.pressure, rootZ: brush.rootZ,
+        dirX: brush.dirX, dirY: brush.dirY, hasDirection: brush.hasDirection,
+        lastMoveX: brush.lastMoveX, lastMoveY: brush.lastMoveY,
+        turnStrength: brush.turnStrength, drawEnabled: brush.drawEnabled,
+        time: Number.isFinite(now) ? now : performance.now()
+      });
+    }
+    function applyRecordedState(state, pressureScale = 1) {
+      brush.x = state.x; brush.y = state.y;
+      brush.pressure = state.pressure * pressureScale;
+      brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
+      brush.dirX = state.dirX; brush.dirY = state.dirY; brush.hasDirection = state.hasDirection;
+      brush.lastMoveX = state.lastMoveX; brush.lastMoveY = state.lastMoveY;
+      brush.turnStrength = state.turnStrength; brush.drawEnabled = state.drawEnabled;
+    }
+    function redrawStrokeWithHarai(endTime) {
+      if (!strokeSnapshot || !strokeStart || !strokeRecords.length) return;
+      replayingStroke = true;
+      ctx.putImageData(strokeSnapshot, 0, 0);
+      applyRecordedState(strokeStart, 1);
+      brush.active = true; brush.drawEnabled = false;
+      resetBristles();
+
+      const replayEnd = Math.max(endTime, strokeRecords[strokeRecords.length - 1].time);
+      for (const state of strokeRecords) {
+        const secondsRemaining = (replayEnd - state.time) / 1000;
+        const linear = Math.max(0, Math.min(1, secondsRemaining));
+        const harai = linear * linear * (3 - 2 * linear); // smooth 1 → 0 over the final second
+        applyRecordedState(state, harai);
+        simulate();
+      }
+      brush.active = false; brush.drawEnabled = false; brush.releasing = false;
+      replayingStroke = false;
+      strokeSnapshot = null; strokeStart = null; strokeRecords = [];
+    }
     function setBrushHeight(inputPressure, speed, now = performance.now()) {
       // Pressure/contact area already produce a nonlinear value.  A second curve
       // makes a light touch visibly finer, while speed lifts the whole brush.
@@ -516,26 +571,15 @@
         const ratio = step / steps;
         brush.x = brush.inputX + dx * ratio;
         brush.y = brush.inputY + dy * ratio;
+        recordBrushState(brush.inputTime + elapsed * ratio);
         simulate();
       }
       brush.inputX = sample.clientX; brush.inputY = sample.clientY; brush.inputTime = sample.timeStamp;
     }
     function frame(now) {
-      if (brush.active) {
-        if (brush.releasing) {
-          const remaining = Math.max(0, 1 - (now - brush.releaseStartedAt) / 1000);
-          if (remaining === 0) {
-            brush.active = false; brush.drawEnabled = false; brush.releasing = false;
-          } else {
-            brush.pressure = brush.sensorPressure * remaining;
-            brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
-            brush.x += brush.lastMoveX * .34 * remaining;
-            brush.y += brush.lastMoveY * .34 * remaining;
-            simulate();
-          }
-        } else {
-          simulate();
-        }
+      if (brush.active && !replayingStroke) {
+        recordBrushState(now);
+        simulate();
       }
       requestAnimationFrame(frame);
     }
@@ -565,7 +609,9 @@
       brush.lastMoveX = 0; brush.lastMoveY = 1;
       brush.turnStrength = 0;
       setBrushHeight(pressureFromContact(e, size), 0);
-      brush.active = true; brush.drawEnabled = false; resetBristles();
+      brush.active = true; brush.drawEnabled = false;
+      beginStrokeHistory(e.timeStamp);
+      resetBristles();
       say('毛の物理計算で描画中', 1050);
       e.preventDefault();
     }, { passive: false });
@@ -582,9 +628,11 @@
       if (activePointer === e.pointerId) {
         activePointer = null;
         if (e.type === 'pointerup' && brush.drawEnabled) {
-          brush.releasing = true; brush.releaseStartedAt = performance.now();
+          brush.active = false;
+          redrawStrokeWithHarai(Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now());
         } else {
           brush.active = false; brush.drawEnabled = false;
+          strokeSnapshot = null; strokeStart = null; strokeRecords = [];
         }
       }
     }
