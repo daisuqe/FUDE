@@ -476,7 +476,10 @@
         }
       }
       const effectiveTaper = Math.max(.018, brush.inkTaper);
-      const inkEnvelope = physicalRadius * Math.pow(effectiveTaper, 1.55);
+      // Match the physical replay width to the lightweight draft width. Pressure
+      // narrows the supplied wet bundle even when the old friction anchors remain.
+      const pressureEnvelope = .035 + Math.pow(Math.max(0, brush.pressure), .82) * .965;
+      const inkEnvelope = physicalRadius * pressureEnvelope * Math.pow(effectiveTaper, 1.55);
       ctx.beginPath();
       let any = false;
       for (let h = 0; h < HAIR_COUNT; h++) {
@@ -486,7 +489,7 @@
         // ink transfer; the long central hairs therefore form a pointed harai.
         const hasVerticalSupport = canHairReachPaper(h);
         const hasInkSupply = Math.hypot(px[tip] - centreX, py[tip] - centreY) <= inkEnvelope
-          || (brush.inkTaper < .08 && h === closestTip);
+          || h === closestTip;
         if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport && hasInkSupply) {
           if (wasWet[h]) {
             const dx = px[tip] - lastInkX[h], dy = py[tip] - lastInkY[h];
@@ -577,6 +580,22 @@
       brush.turnStrength = state.turnStrength; brush.drawEnabled = state.drawEnabled;
       brush.inkTaper = inkTaper;
     }
+    function smoothRecordedPressures(records) {
+      // Centred 1-2-3-2-1 filtering removes isolated sensor frames while keeping
+      // a sustained thinning gesture in the latter half of a stroke.
+      const weights = [1, 2, 3, 2, 1];
+      return records.map((state, index) => {
+        let pressureSum = 0, weightSum = 0;
+        for (let offset = -2; offset <= 2; offset++) {
+          const sample = records[index + offset];
+          if (!sample) continue;
+          const weight = weights[offset + 2];
+          pressureSum += sample.pressure * weight;
+          weightSum += weight;
+        }
+        return { ...state, pressure: pressureSum / weightSum };
+      });
+    }
     function redrawRecordedStroke(endTime, haraiDuration) {
       if (!strokeSnapshot || !strokeStart || !strokeRecords.length) return;
       replayingStroke = true;
@@ -585,12 +604,13 @@
       brush.active = true; brush.drawEnabled = false;
       resetBristles();
 
-      const replayEnd = Math.max(endTime, strokeRecords[strokeRecords.length - 1].time);
+      const replayRecords = smoothRecordedPressures(strokeRecords);
+      const replayEnd = Math.max(endTime, replayRecords[replayRecords.length - 1].time);
       const taperDurationMs = haraiDuration * 1000;
       const taperStart = replayEnd - taperDurationMs;
       let haraiBasePressure = 0;
       let foundBeforeTaper = false;
-      for (const state of strokeRecords) {
+      for (const state of replayRecords) {
         if (!state.drawEnabled) continue;
         if (state.time <= taperStart) {
           haraiBasePressure = state.pressure;
@@ -603,7 +623,7 @@
           break;
         }
       }
-      for (const state of strokeRecords) {
+      for (const state of replayRecords) {
         const remainingMs = replayEnd - state.time;
         const linear = taperDurationMs > 0 ? Math.max(0, Math.min(1, remainingMs / taperDurationMs)) : 1;
         const harai = linear * linear * (3 - 2 * linear);
