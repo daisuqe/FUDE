@@ -21,6 +21,8 @@
     .settings-section h2 { margin: 0 0 7px; font-size: 14px; font-weight: 700; }
     .balance-row { display: grid; grid-template-columns: auto minmax(80px, 1fr) auto; gap: 8px; align-items: center; font-size: 12px; }
     .single-row { display: grid; grid-template-columns: 4.5em minmax(80px, 1fr); gap: 8px; align-items: center; margin-top: 12px; font-size: 13px; font-weight: 700; }
+    .angle-control { display: grid; gap: 1px; }
+    .range-ends { display: flex; justify-content: space-between; color: #746657; font-size: 10px; font-weight: 400; }
     #settings input[type="range"] { width: 100%; accent-color: #34271c; touch-action: pan-x; }
     #blank-paper { width: 100%; margin-top: 7px; padding: 11px; border: 1px solid rgba(50,39,27,.3); border-radius: 9px; background: #fffaf0; color: #2e261e; font: inherit; font-weight: 700; }
     #rotate { display: none; position: fixed; inset: 0; z-index: 4; align-items: center; justify-content: center; background: #e9e1d2; color: #302820; font-size: 16px; text-align: center; line-height: 2; }
@@ -41,6 +43,7 @@
       <label class="balance-row"><span>筆圧</span><input id="write-balance" type="range" min="0" max="100" value="50"><span>押半径</span></label>
       <label class="single-row"><span>太さ</span><input id="thickness" type="range" min="0" max="100" value="50"></label>
       <label class="single-row"><span>早細さ</span><input id="speed-thinness" type="range" min="0" max="100" value="50"></label>
+      <label class="single-row"><span>筆角度</span><span class="angle-control"><input id="brush-angle" type="range" min="0" max="90" value="30"><span class="range-ends"><span>0° 垂直</span><span>90° 進行方向</span></span></span></label>
     </div>
     <button id="blank-paper" type="button">白紙</button>
   </section>
@@ -61,8 +64,6 @@
     const ROOT_RADIUS = 20;          // 以前の2倍: 描画される筆幅も2倍。
     const HAIR_STROKE_WIDTH = 1.28;
     const ROOT_CONTACT_Z = 7;        // The ferrule-side roots are now wetting the paper.
-    const TILT_ANGLE = 30 * Math.PI / 180;
-    const TILT_SIN = Math.sin(TILT_ANGLE), TILT_COS = Math.cos(TILT_ANGLE), TILT_TAN = Math.tan(TILT_ANGLE);
     let dpr = 1, activePointer = null, clearTimer = 0, messageTimer = 0;
 
     // Reproducible randomness: natural-looking placement without changing between runs.
@@ -135,7 +136,10 @@
       startBalance: .50,
       writeBalance: .50,
       thickness: 1,
-      speedThinness: .50
+      speedThinness: .50,
+      tiltAngle: 30 * Math.PI / 180,
+      tiltSin: .5,
+      tiltCos: Math.cos(30 * Math.PI / 180)
     };
 
     function bindRange(id, update) {
@@ -148,6 +152,11 @@
     bindRange('#write-balance', value => { brushSettings.writeBalance = value / 100; });
     bindRange('#thickness', value => { brushSettings.thickness = .4 + value * .012; });
     bindRange('#speed-thinness', value => { brushSettings.speedThinness = value / 100; });
+    bindRange('#brush-angle', value => {
+      brushSettings.tiltAngle = value * Math.PI / 180;
+      brushSettings.tiltSin = Math.sin(brushSettings.tiltAngle);
+      brushSettings.tiltCos = Math.cos(brushSettings.tiltAngle);
+    });
     document.querySelector('#settings-close').addEventListener('click', () => { settingsPanel.hidden = true; });
     document.querySelector('#blank-paper').addEventListener('click', () => {
       if (confirm('紙を白紙に戻しますか？')) { clearPaper(); settingsPanel.hidden = true; }
@@ -192,10 +201,12 @@
       const absolute = Math.max(0, Math.min(1, (size - 2) / 24));
       const relative = Math.max(0, Math.min(1, (size - brush.minSize) / Math.max(1.1, brush.minSize * .10)));
       const areaPressure = Math.max(absolute, relative);
-      // The menu chooses the mix between hardware pressure and contact radius.
-      // The first second can use a separate balance from the body of the stroke.
-      const isEntry = performance.now() - brush.startedAt < 1000;
-      const radiusWeight = isEntry ? brushSettings.startBalance : brushSettings.writeBalance;
+      // 0–1 s: entry setting. 1–2 s: smoothly migrate to the writing setting.
+      // After 2 s the writing balance is used exclusively.
+      const strokeAge = performance.now() - brush.startedAt;
+      const transition = Math.max(0, Math.min(1, (strokeAge - 1000) / 1000));
+      const radiusWeight = brushSettings.startBalance
+        + (brushSettings.writeBalance - brushSettings.startBalance) * transition;
       const combinedPressure = suppliedPressure === null
         ? areaPressure
         : suppliedPressure * (1 - radiusWeight) + areaPressure * radiusWeight;
@@ -203,11 +214,19 @@
       return Math.max(.008, Math.pow(normalized, 1.65));
     }
     function rootPosition(hair, x, y, z) {
-      // Root plane is perpendicular to the 30°-tilted brush axis.
+      // Root plane is perpendicular to the menu-controlled tilted brush axis.
       const scaledRootX = hair.rootX * brushSettings.thickness;
       const scaledRootY = hair.rootY * brushSettings.thickness;
+      const sideX = -brush.dirY, sideY = brush.dirX;
       const forwardOffset = scaledRootX * brush.dirX + scaledRootY * brush.dirY;
-      return { x: x + scaledRootX, y: y + scaledRootY, z: z - forwardOffset * TILT_TAN };
+      const sideOffset = scaledRootX * sideX + scaledRootY * sideY;
+      // Project the circular root plane into screen-space. This remains finite at
+      // 90°, where the root plane is viewed edge-on.
+      return {
+        x: x + sideX * sideOffset + brush.dirX * forwardOffset * brushSettings.tiltCos,
+        y: y + sideY * sideOffset + brush.dirY * forwardOffset * brushSettings.tiltCos,
+        z: z - forwardOffset * brushSettings.tiltSin
+      };
     }
 
     function resetBristles() {
@@ -218,9 +237,9 @@
         for (let n = 0; n < NODES; n++) {
           const t = n / (NODES - 1);
           // Root-to-tip direction is back and down: the handle leans 30° forward.
-          const naturalX = root.x - brush.dirX * TILT_SIN * hair.length * t;
-          const naturalY = root.y - brush.dirY * TILT_SIN * hair.length * t;
-          const naturalZ = root.z - TILT_COS * hair.length * t;
+          const naturalX = root.x - brush.dirX * brushSettings.tiltSin * hair.length * t;
+          const naturalY = root.y - brush.dirY * brushSettings.tiltSin * hair.length * t;
+          const naturalZ = root.z - brushSettings.tiltCos * hair.length * t;
           const j = start + n;
           // A stationary press must not arbitrarily choose a radial escape route.
           // Fibres begin vertically beneath their own roots.  Only a later handle
@@ -379,8 +398,8 @@
             const hair = hairs[h], root = rootPosition(hair, brush.x, brush.y, brush.rootZ), start = h * NODES;
             for (let n = 1; n < NODES; n++) {
               const j = start + n, fraction = n / (NODES - 1);
-              const targetX = root.x - brush.lastMoveX * TILT_SIN * hair.length * fraction;
-              const targetY = root.y - brush.lastMoveY * TILT_SIN * hair.length * fraction;
+              const targetX = root.x - brush.lastMoveX * brushSettings.tiltSin * hair.length * fraction;
+              const targetY = root.y - brush.lastMoveY * brushSettings.tiltSin * hair.length * fraction;
               px[j] += (targetX - px[j]) * gather;
               py[j] += (targetY - py[j]) * gather;
               if (n === NODES - 1) {
