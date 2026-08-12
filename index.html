@@ -48,7 +48,7 @@
       <label class="single-row"><span>太さ</span><input id="thickness" type="range" min="0" max="100" value="50"></label>
       <label class="single-row"><span>早細さ</span><input id="speed-thinness" type="range" min="0" max="100" value="70"></label>
       <label class="single-row"><span>筆角度</span><span class="angle-control"><input id="brush-angle" type="range" min="0" max="90" value="25"><span class="range-ends"><span>0° 垂直</span><span>90° 進行方向</span></span></span></label>
-      <label class="check-row"><input id="harai-enabled" type="checkbox" checked><span>ハライ</span></label>
+      <label class="single-row"><span>ハライ</span><span class="angle-control"><input id="harai-duration" type="range" min="0" max="100" value="100"><span class="range-ends"><span>0秒</span><span>1秒</span></span></span></label>
       <label class="check-row"><input id="final-recompute" type="checkbox" checked><span>最後に再計算</span></label>
     </div>
     <button id="blank-paper" type="button">白紙</button>
@@ -147,7 +147,7 @@
       writeBalance: .30,
       thickness: 1,
       speedThinness: .70,
-      haraiEnabled: true,
+      haraiDuration: 1,
       finalRecompute: true,
       tiltAngle: 25 * Math.PI / 180,
       tiltSin: Math.sin(25 * Math.PI / 180),
@@ -169,9 +169,7 @@
       brushSettings.tiltSin = Math.sin(brushSettings.tiltAngle);
       brushSettings.tiltCos = Math.cos(brushSettings.tiltAngle);
     });
-    document.querySelector('#harai-enabled').addEventListener('change', e => {
-      brushSettings.haraiEnabled = e.currentTarget.checked;
-    });
+    bindRange('#harai-duration', value => { brushSettings.haraiDuration = value / 100; });
     document.querySelector('#final-recompute').addEventListener('change', e => {
       brushSettings.finalRecompute = e.currentTarget.checked;
     });
@@ -522,7 +520,7 @@
       brush.lastMoveX = state.lastMoveX; brush.lastMoveY = state.lastMoveY;
       brush.turnStrength = state.turnStrength; brush.drawEnabled = state.drawEnabled;
     }
-    function redrawRecordedStroke(endTime, applyHarai) {
+    function redrawRecordedStroke(endTime, haraiDuration) {
       if (!strokeSnapshot || !strokeStart || !strokeRecords.length) return;
       replayingStroke = true;
       ctx.putImageData(strokeSnapshot, 0, 0);
@@ -531,7 +529,8 @@
       resetBristles();
 
       const replayEnd = Math.max(endTime, strokeRecords[strokeRecords.length - 1].time);
-      const taperStart = replayEnd - 1000;
+      const taperDurationMs = haraiDuration * 1000;
+      const taperStart = replayEnd - taperDurationMs;
       let haraiBasePressure = 0;
       let foundBeforeTaper = false;
       for (const state of strokeRecords) {
@@ -548,12 +547,13 @@
         }
       }
       for (const state of strokeRecords) {
-        const secondsRemaining = (replayEnd - state.time) / 1000;
-        const linear = Math.max(0, Math.min(1, secondsRemaining));
-        const harai = linear * linear * (3 - 2 * linear); // smooth 1 → 0 over the final second
-        // During the final second, ignore live pressure/contact-radius readings.
-        // Only the synthetic lift from the one-second boundary is used.
-        const syntheticPressure = applyHarai && secondsRemaining < 1 ? haraiBasePressure * harai : null;
+        const remainingMs = replayEnd - state.time;
+        const linear = taperDurationMs > 0 ? Math.max(0, Math.min(1, remainingMs / taperDurationMs)) : 1;
+        const harai = linear * linear * (3 - 2 * linear);
+        // During the selected harai interval, ignore live pressure/contact radius.
+        const syntheticPressure = taperDurationMs > 0 && remainingMs < taperDurationMs
+          ? haraiBasePressure * harai
+          : null;
         applyRecordedState(state, 1, syntheticPressure);
         simulate();
       }
@@ -564,14 +564,14 @@
     function discardStrokeHistory() {
       strokeSnapshot = null; strokeStart = null; strokeRecords = [];
     }
-    function calculateFinalStroke(endTime, applyHarai) {
+    function calculateFinalStroke(endTime, haraiDuration) {
       waitingOverlay.hidden = false;
       document.body.setAttribute('aria-busy', 'true');
       // Give the browser a frame to paint the waiting layer before synchronous
       // physics replay occupies the main thread.
       requestAnimationFrame(() => requestAnimationFrame(() => {
         try {
-          redrawRecordedStroke(endTime, applyHarai);
+          redrawRecordedStroke(endTime, haraiDuration);
         } finally {
           waitingOverlay.hidden = true;
           document.body.removeAttribute('aria-busy');
@@ -705,12 +705,12 @@
       cancelClear();
       if (activePointer === e.pointerId) {
         activePointer = null;
-        const needsReplay = brushSettings.finalRecompute || brushSettings.haraiEnabled;
+        const needsReplay = brushSettings.finalRecompute || brushSettings.haraiDuration > 0;
         if (e.type === 'pointerup' && brush.drawEnabled && needsReplay) {
           brush.active = false;
           calculateFinalStroke(
             Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now(),
-            brushSettings.haraiEnabled
+            brushSettings.haraiDuration
           );
         } else {
           brush.active = false; brush.drawEnabled = false;
