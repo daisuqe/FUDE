@@ -95,7 +95,11 @@
         return { a, b, rest: Math.hypot(hairs[a].rootX - hairs[b].rootX, hairs[a].rootY - hairs[b].rootY) };
       });
     })();
-    const brush = { active: false, drawEnabled: false, x: 0, y: 0, pressure: 0, rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false };
+    const brush = {
+      active: false, drawEnabled: false, x: 0, y: 0, pressure: 0,
+      rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false,
+      inputX: 0, inputY: 0, inputTime: 0
+    };
 
     function fit() {
       dpr = Math.min(devicePixelRatio || 1, 2);
@@ -303,6 +307,36 @@
         if (brush.drawEnabled) depositInk();
       }
     }
+    function setBrushHeight(inputPressure, speed) {
+      // Pressure/contact area already produce a nonlinear value.  A second curve
+      // makes a light touch visibly finer, while speed lifts the whole brush.
+      const contactPressure = Math.pow(inputPressure, 1.35);
+      const speedLift = Math.min(.78, speed * .34);
+      brush.pressure = contactPressure * (1 - speedLift);
+      brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
+    }
+    function advancePointerSample(sample) {
+      const size = contactSize(sample);
+      if (size === null) return;
+      const dx = sample.clientX - brush.inputX, dy = sample.clientY - brush.inputY;
+      const distance = Math.hypot(dx, dy);
+      const elapsed = Math.max(1, sample.timeStamp - brush.inputTime);
+      const speed = distance / elapsed; // CSS pixels per millisecond
+      const inputPressure = pressureFromContact(sample, size);
+      setBrushHeight(inputPressure, speed);
+      if (distance > .35) brush.drawEnabled = true;
+
+      // Fill sparse PointerEvents with physical substeps, rather than stamping
+      // the 500 tips only at event positions during a fast gesture.
+      const steps = Math.max(1, Math.ceil(distance / 2.5));
+      for (let step = 1; step <= steps; step++) {
+        const ratio = step / steps;
+        brush.x = brush.inputX + dx * ratio;
+        brush.y = brush.inputY + dy * ratio;
+        simulate();
+      }
+      brush.inputX = sample.clientX; brush.inputY = sample.clientY; brush.inputTime = sample.timeStamp;
+    }
     function frame() {
       if (brush.active) simulate();
       requestAnimationFrame(frame);
@@ -322,8 +356,8 @@
       canvas.setPointerCapture(e.pointerId);
       activePointer = e.pointerId;
       brush.x = e.clientX; brush.y = e.clientY; brush.minSize = size; brush.nativePressureSeen = false;
-      brush.pressure = pressureFromContact(e, size);
-      brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
+      brush.inputX = e.clientX; brush.inputY = e.clientY; brush.inputTime = e.timeStamp;
+      setBrushHeight(pressureFromContact(e, size), 0);
       brush.active = true; brush.drawEnabled = false; resetBristles();
       say('毛の物理計算で描画中', 1050);
       e.preventDefault();
@@ -331,11 +365,9 @@
     canvas.addEventListener('pointermove', e => {
       if (clearTimer) { if (!isClearCorner(e)) cancelClear(); return; }
       if (!brush.active || activePointer !== e.pointerId) return;
-      const size = contactSize(e); if (size === null) return;
-      if (Math.hypot(e.clientX - brush.x, e.clientY - brush.y) > .35) brush.drawEnabled = true;
-      brush.x = e.clientX; brush.y = e.clientY;
-      brush.pressure = pressureFromContact(e, size);
-      brush.rootZ = 116 * (1 - brush.pressure) * LENGTH_SCALE;
+      const coalesced = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [];
+      const packets = coalesced.length ? coalesced : [e];
+      for (const packet of packets) advancePointerSample(packet);
       e.preventDefault();
     }, { passive: false });
     function endPointer(e) {
