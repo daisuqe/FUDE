@@ -627,13 +627,20 @@
       }
       for (const state of replayRecords) {
         const remainingMs = replayEnd - state.time;
-        const linear = taperDurationMs > 0 ? Math.max(0, Math.min(1, remainingMs / taperDurationMs)) : 1;
-        const harai = linear * linear * (3 - 2 * linear);
+        const remaining = taperDurationMs > 0 ? Math.max(0, Math.min(1, remainingMs / taperDurationMs)) : 1;
+        const progress = 1 - remaining;
+        // A calligraphy brush does not leave the paper at a constant rate.  Keep
+        // most hairs in contact through the first half of the harai, then roll
+        // onto the long centre hairs near its end.  Previously smoothstep was
+        // also applied to the ink width, so the two reductions compounded and
+        // made the brush appear to jump straight up.
+        const haraiPressure = 1 - Math.pow(progress, 2.35);
+        const haraiContact = Math.pow(Math.max(0, haraiPressure), .30);
         // During the selected harai interval, ignore live pressure/contact radius.
         const syntheticPressure = taperDurationMs > 0 && remainingMs < taperDurationMs
-          ? haraiBasePressure * harai
+          ? haraiBasePressure * haraiPressure
           : null;
-        applyRecordedState(state, 1, syntheticPressure, taperDurationMs > 0 ? harai : 1);
+        applyRecordedState(state, 1, syntheticPressure, taperDurationMs > 0 ? haraiContact : 1);
         simulate();
       }
       brush.active = false; brush.drawEnabled = false; brush.releasing = false;
@@ -683,7 +690,11 @@
       // Normal writing speed retains a firm entry; only genuinely fast flicks lift.
       const speedSensitivity = brushSettings.speedThinness;
       const speedThreshold = 1.05 - speedSensitivity * .80;
-      const speedLift = Math.min(.82, Math.max(0, speed - speedThreshold) * (.10 + speedSensitivity * .70));
+      // Speed should suggest lifting, not instantly pull the whole bundle off
+      // the paper.  A curved response preserves contact at ordinary flick speed.
+      const speedExcess = Math.max(0, speed - speedThreshold);
+      const speedLift = Math.min(.56,
+        Math.pow(speedExcess, 1.65) * (.08 + speedSensitivity * .54));
       brush.sensorPressure = contactPressure * (1 - speedLift);
       // A deliberate one-second settling makes the start of every stroke soft.
       const entry = Math.max(0, Math.min(1, (now - brush.startedAt) / 1000));
