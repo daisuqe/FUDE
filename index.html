@@ -25,6 +25,7 @@
     .range-ends { display: flex; justify-content: space-between; color: #746657; font-size: 10px; font-weight: 400; }
     .check-row { display: flex; align-items: center; gap: 9px; margin-top: 14px; font-size: 13px; font-weight: 700; }
     .check-row input { width: 20px; height: 20px; accent-color: #34271c; }
+    .settings-note { margin: 7px 0 0; color: #6f6252; font-size: 11px; line-height: 1.65; }
     #settings input[type="range"] { width: 100%; accent-color: #34271c; touch-action: pan-x; }
     #blank-paper { width: 100%; margin-top: 7px; padding: 11px; border: 1px solid rgba(50,39,27,.3); border-radius: 9px; background: #fffaf0; color: #2e261e; font: inherit; font-weight: 700; }
     #waiting { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: rgba(17,14,11,.62); color: #fffaf0; font-size: 22px; font-weight: 700; letter-spacing: .3em; }
@@ -50,6 +51,7 @@
       <label class="single-row"><span>筆角度</span><span class="angle-control"><input id="brush-angle" type="range" min="0" max="90" value="25"><span class="range-ends"><span>0° 垂直</span><span>90° 進行方向</span></span></span></label>
       <label class="single-row"><span>ハライ</span><span class="angle-control"><input id="harai-duration" type="range" min="0" max="100" value="30"><span class="range-ends"><span>0秒</span><span>1秒</span></span></span></label>
       <label class="check-row"><input id="final-recompute" type="checkbox" checked><span>最後に再計算</span></label>
+      <p class="settings-note">オンは全画を指を離した後に毛の物理で清書します。オフでもハライが0秒より大きい場合は、終筆部分だけ再計算されます。</p>
     </div>
     <button id="blank-paper" type="button">白紙</button>
   </section>
@@ -70,11 +72,40 @@
     const ink = '#100c09';
     const LENGTH_SCALE = .7;
     const ROOT_RADIUS = 20;          // 以前の2倍: 描画される筆幅も2倍。
-    const HAIR_STROKE_WIDTH = 1.28;
+    const HAIR_STROKE_WIDTH = 1.6;   // 250本では1.28だと毛の間に規則的な隙間が残る。
     const ROOT_CONTACT_Z = 7;        // The ferrule-side roots are now wetting the paper.
+    // A harai thins to a hairline, never to nothing: the longest central fibre has to
+    // keep touching the paper so a stroke ends in a point instead of stopping dead.
+    const HARAI_MIN_PRESSURE = .014;
+    const HARAI_MIN_CONTACT = .02;
+    const MIN_INK_LINE_WIDTH = .5;   // 穂先が消える前に線が見えなくならない最小の墨糸。
     let dpr = 1, activePointer = null, clearTimer = 0, messageTimer = 0;
-    let strokeSnapshot = null, strokeStart = null, strokeRecords = [], replayingStroke = false;
-    let previewX = 0, previewY = 0, previewReady = false;
+    let snapshotValid = false, strokeStart = null, strokeRecords = [], replayingStroke = false;
+    let previewX = 0, previewY = 0, previewReady = false, paperReady = false;
+    // Committed paper layer.  Copying bitmaps is far cheaper than ImageData: a
+    // full-screen getImageData at DPR 2 allocates several megabytes and stalls the
+    // main thread at the start of every single stroke.
+    const layer = document.createElement('canvas');
+    const layerCtx = layer.getContext('2d', { alpha: false });
+    function copyCanvasToLayer() {
+      if (!canvas.width || !canvas.height) return false;
+      if (layer.width !== canvas.width || layer.height !== canvas.height) {
+        layer.width = canvas.width; layer.height = canvas.height;
+      }
+      layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+      layerCtx.drawImage(canvas, 0, 0);
+      return true;
+    }
+    function drawLayerToCanvas() {
+      // Device pixels 1:1, so this replaces putImageData without touching the
+      // DPR transform or the stroke styles the ink renderer relies on.
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(layer, 0, 0);
+      ctx.restore();
+    }
 
     // Reproducible randomness: natural-looking placement without changing between runs.
     const randomAt = (index, salt) => {
@@ -141,7 +172,7 @@
       active: false, drawEnabled: false, x: 0, y: 0, pressure: 0,
       rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false,
       inputX: 0, inputY: 0, inputTime: 0, dirX: 0, dirY: -1, hasDirection: false,
-      sensorPressure: 0, startedAt: 0, releasing: false, releaseStartedAt: 0,
+      sensorPressure: 0, startedAt: 0, releasing: false,
       lastMoveX: 0, lastMoveY: 1, turnStrength: 0, inkTaper: 1
     };
     const brushSettings = {
@@ -172,9 +203,12 @@
       brushSettings.tiltCos = Math.cos(brushSettings.tiltAngle);
     });
     bindRange('#harai-duration', value => { brushSettings.haraiDuration = value / 100; });
-    document.querySelector('#final-recompute').addEventListener('change', e => {
-      brushSettings.finalRecompute = e.currentTarget.checked;
-    });
+    // Read the checkbox at startup exactly as bindRange reads the sliders: browsers
+    // restore form state across a reload, so the markup is not a reliable default.
+    const recomputeToggle = document.querySelector('#final-recompute');
+    const applyRecompute = () => { brushSettings.finalRecompute = recomputeToggle.checked; };
+    recomputeToggle.addEventListener('change', applyRecompute);
+    applyRecompute();
     document.querySelector('#settings-close').addEventListener('click', () => { settingsPanel.hidden = true; });
     document.querySelector('#blank-paper').addEventListener('click', () => {
       if (confirm('紙を白紙に戻しますか？')) { clearPaper(); settingsPanel.hidden = true; }
@@ -182,10 +216,19 @@
 
     function fit() {
       dpr = Math.min(devicePixelRatio || 1, 2);
-      canvas.width = Math.round(innerWidth * dpr); canvas.height = Math.round(innerHeight * dpr);
+      const width = Math.round(innerWidth * dpr), height = Math.round(innerHeight * dpr);
+      // iOS shows and hides its address bar during use and fires resize each time.
+      // Re-initialising the canvas there used to erase finished calligraphy.
+      if (canvas.width === width && canvas.height === height) return;
+      const kept = paperReady && copyCanvasToLayer();
+      canvas.width = width; canvas.height = height;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.fillStyle = '#f4eddf'; ctx.fillRect(0, 0, innerWidth, innerHeight);
       ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      if (kept) drawLayerToCanvas();
+      paperReady = true;
+      // Recorded coordinates belong to the previous viewport: never replay them.
+      discardStrokeHistory();
     }
     fit();
     addEventListener('resize', fit, { passive: true });
@@ -196,7 +239,7 @@
     }
     function clearPaper() {
       ctx.fillStyle = '#f4eddf'; ctx.fillRect(0, 0, innerWidth, innerHeight);
-      strokeSnapshot = null; strokeStart = null; strokeRecords = [];
+      snapshotValid = false; strokeStart = null; strokeRecords = [];
       say('紙を新しくしました');
     }
     function contactSize(e) {
@@ -265,7 +308,8 @@
         const hair = hairs[h], root = rootPosition(hair, brush.x, brush.y, brush.rootZ), start = h * NODES;
         for (let n = 0; n < NODES; n++) {
           const t = n / (NODES - 1);
-          // Root-to-tip direction is back and down: the handle leans 30° forward.
+          // Root-to-tip direction is back and down: the handle leans forward by the
+          // 筆角度 setting, so the tip starts behind its root, never beside it.
           const naturalX = root.x - brush.dirX * brushSettings.tiltSin * hair.length * t;
           const naturalY = root.y - brush.dirY * brushSettings.tiltSin * hair.length * t;
           const naturalZ = root.z - brushSettings.tiltCos * hair.length * t;
@@ -521,8 +565,10 @@
         // 少ない毛でも濡れた毛束として連続して見える太さで描く。
         // More pressure carries a wetter, slightly wider individual ink thread.
         ctx.lineCap = brush.inkTaper < .999 ? 'butt' : 'round';
-        ctx.lineWidth = HAIR_STROKE_WIDTH * brushSettings.thickness
-          * (.18 + brush.inkTaper * .82) * (1 + brush.pressure * .45);
+        // Floor the thread so the end of a harai stays a crisp hairline rather
+        // than fading to nothing before the recorded stroke has finished.
+        ctx.lineWidth = Math.max(MIN_INK_LINE_WIDTH, HAIR_STROKE_WIDTH * brushSettings.thickness
+          * (.18 + brush.inkTaper * .82) * (1 + brush.pressure * .45));
         ctx.stroke();
         ctx.lineCap = 'round';
       }
@@ -555,7 +601,7 @@
     function beginStrokeHistory(now) {
       // Preserve the paper exactly as it was before this stroke. The finished
       // stroke can then be rebuilt with a one-second pressure taper at its end.
-      strokeSnapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      snapshotValid = copyCanvasToLayer();
       strokeRecords = [];
       strokeStart = {
         x: brush.x, y: brush.y, pressure: brush.pressure, rootZ: brush.rootZ,
@@ -600,58 +646,90 @@
       });
     }
     function redrawRecordedStroke(haraiDuration) {
-      if (!strokeSnapshot || !strokeStart || !strokeRecords.length) return;
+      if (!snapshotValid || !strokeStart || !strokeRecords.length) return;
       replayingStroke = true;
-      ctx.putImageData(strokeSnapshot, 0, 0);
-      applyRecordedState(strokeStart, 1);
-      brush.active = true; brush.drawEnabled = false;
-      resetBristles();
+      // A throw in here used to leave replayingStroke set, which silently stopped
+      // every later stroke from being recorded at all.
+      try {
+        drawLayerToCanvas();
+        applyRecordedState(strokeStart, 1);
+        brush.active = true; brush.drawEnabled = false;
+        resetBristles();
 
-      const replayRecords = smoothRecordedPressures(strokeRecords);
-      // Harai belongs to the final moving part of the stroke. Do not consume its
-      // duration on stationary frames between the last move and pointer release.
-      const replayEnd = replayRecords[replayRecords.length - 1].time;
-      const taperDurationMs = haraiDuration * 1000;
-      const taperStart = replayEnd - taperDurationMs;
-      let haraiBasePressure = 0;
-      let foundBeforeTaper = false;
-      for (const state of replayRecords) {
-        if (!state.drawEnabled) continue;
-        if (state.time <= taperStart) {
-          haraiBasePressure = state.pressure;
-          foundBeforeTaper = true;
-        } else if (!foundBeforeTaper) {
-          // For a stroke shorter than one second, use its first drawable pressure.
-          haraiBasePressure = state.pressure;
-          break;
-        } else {
-          break;
+        const replayRecords = smoothRecordedPressures(strokeRecords);
+        const lastIndex = replayRecords.length - 1;
+        // A harai is a travelled taper, not a clock.  Accumulated paper distance is
+        // what the eye actually reads, so the taper is normalised along it: a short
+        // pause before the finger leaves no longer eats the whole interval, and the
+        // thinning always finishes exactly where the stroke does.
+        const travelled = new Float64Array(replayRecords.length);
+        for (let i = 1; i <= lastIndex; i++) {
+          travelled[i] = travelled[i - 1] + Math.hypot(
+            replayRecords[i].x - replayRecords[i - 1].x,
+            replayRecords[i].y - replayRecords[i - 1].y);
         }
+        const endTime = replayRecords[lastIndex].time;
+        const endDistance = travelled[lastIndex];
+        const taperDurationMs = haraiDuration * 1000;
+        // Reach back over whichever is longer: the requested time, or a few brush
+        // widths of travel.  A fast flick then still tapers over a visible length.
+        const brushWidth = ROOT_RADIUS * 2 * brushSettings.thickness;
+        const taperDistance = Math.min(brushWidth * 6, brushWidth * 3 * (taperDurationMs / 300));
+        // The entry must survive.  A taper never grows back into the start of the
+        // stroke, and never covers more than 70 % of the travelled distance.
+        const strokeSpanTime = endTime - replayRecords[0].time;
+        const entryGuard = replayRecords[0].time + Math.min(1000, strokeSpanTime * .5);
+        const distanceGuard = endDistance * .30;
+        let taperIndex = replayRecords.length;
+        if (taperDurationMs > 0) {
+          taperIndex = lastIndex;
+          while (taperIndex > 0) {
+            const previous = taperIndex - 1;
+            const withinTime = endTime - replayRecords[previous].time <= taperDurationMs;
+            const withinDistance = endDistance - travelled[previous] <= taperDistance;
+            if (!withinTime && !withinDistance) break;
+            if (replayRecords[previous].time < entryGuard || travelled[previous] < distanceGuard) break;
+            taperIndex = previous;
+          }
+        }
+        const taperStartTime = taperIndex <= lastIndex ? replayRecords[taperIndex].time : endTime;
+        const taperStartDistance = taperIndex <= lastIndex ? travelled[taperIndex] : endDistance;
+        const taperSpanDistance = endDistance - taperStartDistance;
+        const taperSpanTime = Math.max(1, endTime - taperStartTime);
+        // The width the stroke had immediately before the taper begins.
+        const haraiBasePressure = replayRecords[Math.max(0, taperIndex - 1)].pressure;
+
+        let taperCap = 1;
+        for (let i = 0; i <= lastIndex; i++) {
+          const state = replayRecords[i];
+          const inHarai = taperDurationMs > 0 && i >= taperIndex;
+          let syntheticPressure = null, contactTaper = 1;
+          if (inHarai) {
+            // Fall back to time only when the finger stood still at the release point.
+            const progress = taperSpanDistance > 2
+              ? (travelled[i] - taperStartDistance) / taperSpanDistance
+              : (state.time - taperStartTime) / taperSpanTime;
+            const remaining = Math.max(0, Math.min(1, 1 - progress));
+            // Monotone envelope: once a harai starts the bundle may only narrow, so
+            // a noisy sensor frame can never push thickness back into the tip.
+            taperCap = Math.min(taperCap, Math.max(HARAI_MIN_PRESSURE, Math.pow(remaining, .72)));
+            // Never wider than what was really written: the taper can only thin.
+            syntheticPressure = Math.min(state.pressure, haraiBasePressure * taperCap);
+            contactTaper = Math.max(HARAI_MIN_CONTACT, Math.pow(taperCap, .65));
+          }
+          applyRecordedState(state, 1, syntheticPressure, contactTaper);
+          brush.releasing = inHarai;
+          simulate();
+        }
+      } finally {
+        brush.active = false; brush.drawEnabled = false; brush.releasing = false;
+        brush.inkTaper = 1;
+        replayingStroke = false;
+        discardStrokeHistory();
       }
-      for (const state of replayRecords) {
-        const remainingMs = replayEnd - state.time;
-        const remaining = taperDurationMs > 0 ? Math.max(0, Math.min(1, remainingMs / taperDurationMs)) : 1;
-        // Reduce contact continuously through the complete harai interval.  The
-        // previous curve retained almost the full bundle until very near the end,
-        // so it looked thick throughout and then disappeared.  This curve rolls
-        // progressively from the outer hairs onto the long central tip.
-        const haraiPressure = Math.pow(remaining, .72);
-        const haraiContact = Math.pow(haraiPressure, .65);
-        // During the selected harai interval, ignore live pressure/contact radius.
-        const inHarai = taperDurationMs > 0 && remainingMs <= taperDurationMs;
-        const syntheticPressure = inHarai
-          ? haraiBasePressure * haraiPressure
-          : null;
-        applyRecordedState(state, 1, syntheticPressure, inHarai ? haraiContact : 1);
-        brush.releasing = inHarai;
-        simulate();
-      }
-      brush.active = false; brush.drawEnabled = false; brush.releasing = false;
-      replayingStroke = false;
-      strokeSnapshot = null; strokeStart = null; strokeRecords = [];
     }
     function discardStrokeHistory() {
-      strokeSnapshot = null; strokeStart = null; strokeRecords = [];
+      snapshotValid = false; strokeStart = null; strokeRecords = [];
     }
     function calculateFinalStroke(haraiDuration) {
       waitingOverlay.hidden = false;
@@ -748,12 +826,9 @@
       }
       brush.inputX = sample.clientX; brush.inputY = sample.clientY; brush.inputTime = sample.timeStamp;
     }
-    function frame(now) {
-      // Physics is advanced by distance-interpolated PointerEvents.  Running an
-      // extra simulation only here made live mode denser and wetter than replay.
-      requestAnimationFrame(frame);
-    }
-    requestAnimationFrame(frame);
+    // There is deliberately no animation loop.  Physics is advanced by the
+    // distance-interpolated PointerEvents; an extra simulation per frame made live
+    // mode denser than replay, and an empty rAF loop only burned battery.
 
     canvas.addEventListener('pointerdown', e => {
       if (matchMedia('(orientation: landscape)').matches) return;
@@ -805,8 +880,8 @@
           calculateFinalStroke(brushSettings.haraiDuration);
         } else {
           brush.active = false; brush.drawEnabled = false;
-          if (e.type === 'pointercancel' && brushSettings.finalRecompute && strokeSnapshot) {
-            ctx.putImageData(strokeSnapshot, 0, 0);
+          if (e.type === 'pointercancel' && brushSettings.finalRecompute && snapshotValid) {
+            drawLayerToCanvas();
           }
           discardStrokeHistory();
         }

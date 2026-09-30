@@ -1,0 +1,60 @@
+Sheet music transcription
+Time: 4/4
+Key signature: 1 sharp (F#)
+MIDI tempo: 96 BPM
+Pitch notation: scientific pitch notation (middle C = C4)
+Durations: w=whole, h=half, q=quarter, dq=dotted quarter,
+           e=eighth, de=dotted eighth, s=sixteenth
+Chords: notes inside [ ] sound together
+
+RIGHT HAND
+m01  G4:q  G4:q  A4:q  B4:q
+m02  C5:q  D5:q  C5:q  B4:q
+m03  B4:q  G4:q  A4:q  A4:q
+m04  G4:q  [D4+G4]:q  [D4+G4]:h
+m05  B4:dq  G4:e  F#5:dq  E5:e
+m06  G5:e  F#5:e  E5:e  D5:e  C5:h
+m07  A4:e  C5:e  E5:e  F#5:e  G5:q  B5:q
+m08  [G5+B5]:w
+m09  B4:dq  G4:e  F#5:dq  E5:e
+m10  G5:e  F#5:e  D5:e  E5:e  B4:h
+m11  F#5:dq  E5:e  F#5:q  A5:q
+m12  [A4+E5]:w
+m13  [G5+D6]:dq  [A5+D6]:e  [B5+D6]:dq  [G5+B5]:e
+m14  [A5+C6]:dq  [G5+C6]:e  [F#5+C6]:dq  [F#5+A5]:e
+m15  [D5+B5]:h  [E5+F#5]:q  [C#5+A5]:q
+m16  D5:w
+m17  B4:dq  G4:e  F#5:dq  E5:e
+m18  G5:e  F#5:e  E5:e  D5:e  [B4+D5]:h
+m19  F#5:q  G5:de  A5:s  B5:q  G5:q
+m20  F#5:w
+m21  G4:q  G4:q  A4:q  B4:q
+m22  C5:q  D5:q  C5:q  B4:q
+m23  B4:q  G4:q  A4:q  A4:q
+m24  [D4+G4]:w
+
+LEFT HAND
+m01  A3:q  A3:q  B3:q  F#3:q
+m02  F#3:q  D3:q  B2:q  D3:q
+m03  D3:h  D3:h
+m04  G2:q  [G2+B2]:q  [G2+B2]:h
+m05  F#3:e  A3:e  C4:e  A3:e  F#3:e  A3:e  C4:e  A3:e
+m06  F#3:e  A3:e  C4:e  A3:e  F#3:e  A3:e  C4:e  A3:e
+m07  F#3:e  A3:e  C4:e  A3:e  F#3:e  A3:e  C4:e  A3:e
+m08  C3:e  E3:e  G3:e  B3:e  D4:e  B3:e  G3:e  E3:e
+m09  F#3:e  A3:e  C4:e  A3:e  F#3:e  A3:e  C4:e  A3:e
+m10  F#3:e  A3:e  C4:e  A3:e  F#3:e  A3:e  C4:e  A3:e
+m11  D3:e  F#3:e  A3:e  C4:e  E4:e  C4:e  A3:e  F#3:e
+m12  F#3:e  A3:e  C4:e  A3:e  D3:h
+m13  G3:e  B3:e  D4:e  G4:e  G3:e  B3:e  D4:e  G4:e
+m14  F#3:e  A3:e  D4:e  F#4:e  F#3:e  A3:e  D4:e  F#4:e
+m15  G3:e  B3:e  D4:e  G4:e  G3:e  C4:e  E4:e  G4:e
+m16  F#4:e  A3:e  D4:e  A3:e  F#4:e  E4:e  D4:e  A3:e
+m17  F#3:e  A3:e  C4:e  A3:e  F#3:e  A3:e  C4:e  A3:e
+m18  D3:e  F#3:e  A3:e  F#3:e  B2:e  F#3:e  A3:e  F#3:e
+m19  D3:e  F#3:e  A3:e  F#3:e  D3:e  F#3:e  A3:e  F#3:e
+m20  F#3:e  A3:e  C4:e  A3:e  C4:e  D4:e  E4:e  F#4:e
+m21  F#3:q  F#3:q  A3:q  E3:q
+m22  E3:q  C3:q  A2:q  C3:q
+m23  B2:h  B2:h
+m24  B2:q  D3:q  E2:h
