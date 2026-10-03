@@ -94,18 +94,32 @@
     const ink = '#100c09';
     const LENGTH_SCALE = .7;
     const ROOT_RADIUS = 20;          // 以前の2倍: 描画される筆幅も2倍。
-    const HAIR_STROKE_WIDTH = 1.6;   // 250本では1.28だと毛の間に規則的な隙間が残る。
-    const ROOT_CONTACT_Z = 7;        // The ferrule-side roots are now wetting the paper.
+    const HAIR_STROKE_WIDTH = 1.6;   // 毛1本分の墨の太さ。穂先の幅に最低でもこの半分を足す。
     // A harai thins to a hairline, never to nothing: the longest central fibre has to
     // keep touching the paper so a stroke ends in a point instead of stopping dead.
     const HARAI_MIN_PRESSURE = .014;
     const HARAI_MIN_CONTACT = .02;
-    const MIN_INK_LINE_WIDTH = .5;   // 穂先が消える前に線が見えなくならない最小の墨糸。
     // iPhoneで実測した接触サイズ sqrt(width*height) の範囲。最小は約24.3pxの1段階、
     // 強く押すと170px前後まで出る。最初の1サンプルから推定すると、段階値の入力では
     // 推定が外れて固定されるため、実測値を初期値にして観測で外側へ広げるだけにする。
     const DEFAULT_CONTACT_MIN = 24, DEFAULT_CONTACT_MAX = 170;
-    const MAX_INK_BRIDGE_SQ = 64;    // 一瞬接触が切れた毛を繋ぐ上限(8px)の二乗。
+    // 穂先(濡れた墨の頭)の描き方。
+    const INK_SPREAD_PERCENTILE = .97;  // 届く毛の根元の横方向の広がりの何%点を幅にするか(根元は滑らかな分布なので外れ値はない)。
+    const INK_SPREAD_GAIN = 1.0;        // その広がりを墨の半径へ換算する係数。
+    const INK_ALONG_FOLLOW = .06;       // 毛先の遅れ(進行方向)へ追従する速さ。小さいほど滑らか。
+    const INK_SIDE_FOLLOW = .06;        // 横方向の中心へ追従する速さ。小さいほど線がまっすぐ。
+    const INK_RADIUS_FOLLOW = .10;      // 物理から求めた半径への追従の速さ(接地本数の増減ならし)。
+    // 輪郭の傾きの上限(進んだ距離1pxあたりに半径が増減できる量)。接地本数が増減しても
+    // 輪郭にこぶができず、細い穂先から目の形に膨らんで、また細く抜ける。
+    const INK_RADIUS_RISE_SLOPE = .20;
+    const INK_RADIUS_FALL_SLOPE = .32;
+    const INK_MIN_PENETRATION = 3.5;    // 毛が紙へ食い込む深さがこれ未満なら墨を出さない(px)。
+    const INK_WET_REACH = 16;           // 毛先がこの高さ(px)までの浮きなら、墨は表面張力で紙とつながる。
+    const INK_HANDLE_FOLLOW = .25;      // 指の位置のなだらかさ。指先の検出ノイズで頭が震えないように。
+    const INK_HEAD_LAG_SCALE = .85;     // 頭が指から遅れられる距離 = 最長毛 × sin(筆角度) × この値 + 余裕。
+    const INK_HEAD_LAG_SLACK = 4;
+    const MAX_INK_RADIUS_SCALE = 1.15;  // 半径の上限 = 筆束の半径 × 太さ × この値。
+    const MIN_INK_RADIUS = .45;         // 穂先の最小半径(線の太さ0.9px)。
     const MIN_CONTACT_BITE = 6;      // 最軽接触でも中央毛を紙へ食い込ませる深さ。
     const CONTACT_STORE = 'fude.contactRange';
     // iPhone reports width/height in coarse steps (multiples of ~24.3 px), so a
@@ -151,8 +165,6 @@
     // Position and previous-position pairs form a Verlet 3D particle system.
     const px = new Float32Array(PARTICLES), py = new Float32Array(PARTICLES), pz = new Float32Array(PARTICLES);
     const ox = new Float32Array(PARTICLES), oy = new Float32Array(PARTICLES), oz = new Float32Array(PARTICLES);
-    const lastInkX = new Float32Array(HAIR_COUNT), lastInkY = new Float32Array(HAIR_COUNT);
-    const wasWet = new Uint8Array(HAIR_COUNT);
     const anchorX = new Float32Array(HAIR_COUNT), anchorY = new Float32Array(HAIR_COUNT);
     const tipAnchored = new Uint8Array(HAIR_COUNT);
     const hairs = Array.from({ length: HAIR_COUNT }, (_, i) => {
@@ -408,9 +420,9 @@
           py[j] = oy[j] = naturalY;
           pz[j] = oz[j] = Math.max(PAPER_Z, naturalZ);
         }
-        wasWet[h] = 0;
         tipAnchored[h] = 0;
       }
+      resetInk();
     }
 
     function pinRoots() {
@@ -573,116 +585,108 @@
         }
       }
     }
+    // The wet tip is ONE body.  Surface tension binds the contacting hair tips into a
+    // single pointed head of ink, so it is laid down as a continuous trail instead of
+    // one stroke per hair (which breaks up into parallel streaks and dashes).  The
+    // body still comes from the physics: its width is the sideways spread of the tips
+    // that really touch the paper, and its position trails the handle by the lag the
+    // tips really have.  Pressure only changes which tips reach the paper.
+    const inkBody = { ready: false, x: 0, y: 0, along: 0, side: 0, radius: 0, shape: 0, lost: 0, hx: 0, hy: 0 };
+    const spreadBuffer = new Float32Array(HAIR_COUNT);
+    function resetInk() { inkBody.ready = false; inkBody.lost = 0; }
     function depositInk() {
-      const canHairReachPaper = h => {
+      // Which hairs can bridge the distance to the paper depends only on the handle's
+      // height: only the vertical projection of a tilted fibre counts, so as the
+      // handle rises the short rim fibres drop out first and the long rounded centre
+      // is left.  That makes the wet width a clean function of pressure.  Measuring
+      // the tips instead is not: lifted, taut hairs hover and flicker in and out of
+      // contact from one step to the next, which broke the body into beads and gaps.
+      const sideX = -brush.dirY, sideY = brush.dirX;
+      let reach = 0, wet = 0, alongWet = 0, sideWet = 0, alongAll = 0, sideAll = 0, rootSide = 0;
+      for (let h = 0; h < HAIR_COUNT; h++) {
         const hair = hairs[h];
         const root = rootPosition(hair, brush.x, brush.y, brush.rootZ);
-        // Only the vertical projection of a tilted fibre can bridge the distance
-        // to paper. As the handle rises, short rim fibres lose contact first and
-        // the long rounded centre of the brush remains.
-        const verticalReach = hair.length * brushSettings.tiltCos;
-        return root.z <= verticalReach + .55;
-      };
-      // Find the actual centre of the currently contacting physical tips. The
-      // harai envelope must shrink around this point, not around root indices.
-      let centreX = 0, centreY = 0, contactCount = 0;
-      for (let h = 0; h < HAIR_COUNT; h++) {
+        // A fibre that only grazes the paper leaves no ink; it has to be pressed in a
+        // little.  This is what keeps the lightest touch a hairline instead of the
+        // whole set of fibres that happen to be within a few pixels of the paper.
+        if (root.z > hair.length * brushSettings.tiltCos + .55 - INK_MIN_PENETRATION) continue;
+        const lateral = (root.x - brush.x) * sideX + (root.y - brush.y) * sideY;
+        spreadBuffer[reach++] = lateral; rootSide += lateral;
         const tip = h * NODES + NODES - 1;
-        const hasVerticalSupport = canHairReachPaper(h);
-        if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport) {
-          centreX += px[tip]; centreY += py[tip]; contactCount++;
-        }
+        const dx = px[tip] - brush.x, dy = py[tip] - brush.y;
+        const along = dx * brush.dirX + dy * brush.dirY, side = dx * sideX + dy * sideY;
+        alongAll += along; sideAll += side;
+        // A tip a few pixels above the paper is still joined to it by the wet head.
+        if (pz[tip] <= PAPER_Z + INK_WET_REACH) { alongWet += along; sideWet += side; wet++; }
       }
-      if (!contactCount) { wasWet.fill(0); return; }
-      centreX /= contactCount; centreY /= contactCount;
-      let physicalRadius = .001;
-      let closestTip = -1, closestDistance = Infinity;
-      for (let h = 0; h < HAIR_COUNT; h++) {
-        const tip = h * NODES + NODES - 1;
-        if (pz[tip] <= PAPER_Z + .08 && canHairReachPaper(h)) {
-          const distance = Math.hypot(px[tip] - centreX, py[tip] - centreY);
-          physicalRadius = Math.max(physicalRadius, distance);
-          if (distance < closestDistance) { closestDistance = distance; closestTip = h; }
-        }
+      // A brief loss of contact keeps the body so the trail bridges the gap; a long
+      // one starts a new trail instead of drawing a line across empty paper.
+      if (!reach) {
+        if (++inkBody.lost > 8) inkBody.ready = false;
+        return;
       }
-      const effectiveTaper = Math.max(.018, brush.inkTaper);
-      // Match the physical replay width to the lightweight draft width. Pressure
-      // narrows the supplied wet bundle even when the old friction anchors remain.
-      const pressureEnvelope = .035 + Math.pow(Math.max(0, brush.pressure), .82) * .965;
-      const inkEnvelope = physicalRadius * pressureEnvelope * Math.pow(effectiveTaper, 1.55);
+      inkBody.lost = 0;
+      // How far the head trails the handle comes from the tips themselves (their drag
+      // and lag); the hovering ones are used only if every reaching tip has lifted off.
+      // Its sideways position is the middle of the reaching hairs' roots instead: the
+      // tips swap in and out of contact from step to step, and following their average
+      // made the head wander a few pixels left and right, beading the line.
+      const meanAlong = wet ? alongWet / wet : alongAll / reach;
+      const centre = rootSide / reach;
+      const meanSide = centre;
+      // Sideways extent of the hairs that reach the paper.  A high percentile (not
+      // the maximum) keeps one stray fibre from widening the trail.
+      for (let i = 0; i < reach; i++) spreadBuffer[i] = Math.abs(spreadBuffer[i] - centre);
+      const spreadView = spreadBuffer.subarray(0, reach);
+      spreadView.sort();
+      const rawRadius = spreadView[Math.floor((reach - 1) * INK_SPREAD_PERCENTILE)] * INK_SPREAD_GAIN
+        + HAIR_STROKE_WIDTH * brushSettings.thickness * .5;
+
+      if (!inkBody.ready) {
+        // A stroke always begins as a fine point and swells from there.
+        inkBody.along = meanAlong; inkBody.side = meanSide; inkBody.radius = rawRadius;
+        inkBody.shape = MIN_INK_RADIUS;
+        inkBody.hx = brush.x; inkBody.hy = brush.y;
+        inkBody.x = brush.x + brush.dirX * meanAlong + sideX * meanSide;
+        inkBody.y = brush.y + brush.dirY * meanAlong + sideY * meanSide;
+        inkBody.ready = true;
+        return;                                  // first contact never stamps a dot
+      }
+      // The lag behind the handle changes slowly (it is a bundle's worth of friction);
+      // averaging it removes the stick-slip of individual tips from the trail.  Tips
+      // that friction leaves stranded far behind do not hold the head back: surface
+      // tension keeps the wet head within a tilt-dependent reach of the handle, or the
+      // head would stall while the finger travels on and the body would be cut off.
+      const maxLag = MAX_HAIR_LENGTH * brushSettings.tiltSin * INK_HEAD_LAG_SCALE + INK_HEAD_LAG_SLACK;
+      inkBody.along += (Math.max(meanAlong, -maxLag) - inkBody.along) * INK_ALONG_FOLLOW;
+      inkBody.side += (meanSide - inkBody.side) * INK_SIDE_FOLLOW;
+      inkBody.radius += (rawRadius - inkBody.radius) * INK_RADIUS_FOLLOW;
+      // The head hangs from a lightly smoothed handle position.  Fingertip tracking
+      // noise of a few tenths of a pixel would otherwise shake the head back and
+      // forth, and that shaking would count as distance travelled.
+      inkBody.hx += (brush.x - inkBody.hx) * INK_HANDLE_FOLLOW;
+      inkBody.hy += (brush.y - inkBody.hy) * INK_HANDLE_FOLLOW;
+      const nextX = inkBody.hx + brush.dirX * inkBody.along + sideX * inkBody.side;
+      const nextY = inkBody.hy + brush.dirY * inkBody.along + sideY * inkBody.side;
+      const dx = nextX - inkBody.x, dy = nextY - inkBody.y;
+      const travelled = Math.hypot(dx, dy);
+      // A zero-length round-capped stroke is a dot: lay ink only once the head moved.
+      if (travelled < .2) return;
+      // The outline may only swell or narrow so fast per pixel of travel: whatever
+      // the touching hairs do from step to step, the edge stays a smooth curve.
+      const ceiling = MAX_INK_RADIUS_SCALE * ROOT_RADIUS * brushSettings.thickness;
+      inkBody.shape = Math.max(inkBody.shape - INK_RADIUS_FALL_SLOPE * travelled - .02,
+        Math.min(inkBody.shape + INK_RADIUS_RISE_SLOPE * travelled + .02, Math.min(ceiling, inkBody.radius)));
+      // A harai thins the head to a point on top of that; the touching hairs thin it too.
+      const radius = Math.max(MIN_INK_RADIUS, inkBody.shape * Math.pow(Math.max(.02, brush.inkTaper), 1.1));
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = ink;
+      ctx.lineCap = 'round';
+      ctx.lineWidth = radius * 2;
       ctx.beginPath();
-      let any = false;
-      for (let h = 0; h < HAIR_COUNT; h++) {
-        const tip = h * NODES + NODES - 1;
-        // When lifting, shorter outer hairs lose vertical support first.  They may
-        // still be physically trailing on the paper, but no longer receive enough
-        // ink transfer; the long central hairs therefore form a pointed harai.
-        const hasVerticalSupport = canHairReachPaper(h);
-        const hasInkSupply = Math.hypot(px[tip] - centreX, py[tip] - centreY) <= inkEnvelope
-          || h === closestTip;
-        if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport && hasInkSupply) {
-          if (!wasWet[h]) {
-            lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 1;
-          } else {
-            const dx = px[tip] - lastInkX[h], dy = py[tip] - lastInkY[h];
-            const travelSq = dx * dx + dy * dy;
-            if (travelSq > MAX_INK_BRIDGE_SQ) {
-              // Too far to be one continuous wet trail: start a new segment here.
-              lastInkX[h] = px[tip]; lastInkY[h] = py[tip];
-            } else if (travelSq > .0225) {
-              // A zero-length Canvas stroke still paints its round cap as a dot.
-              // Do not transfer ink until this individual tip has genuinely moved;
-              // otherwise stationary root positions outline the brush as a circle.
-              let startX = lastInkX[h], startY = lastInkY[h];
-              if (brush.inkTaper < .999) {
-                const fromCentreX = startX - centreX, fromCentreY = startY - centreY;
-                const startRadius = Math.hypot(fromCentreX, fromCentreY);
-                if (startRadius > inkEnvelope && startRadius > 0) {
-                  startX = centreX + fromCentreX / startRadius * inkEnvelope;
-                  startY = centreY + fromCentreY / startRadius * inkEnvelope;
-                }
-              }
-              ctx.moveTo(startX, startY); ctx.lineTo(px[tip], py[tip]); any = true;
-              lastInkX[h] = px[tip]; lastInkY[h] = py[tip];
-            }
-            // Below the threshold lastInk is deliberately left alone so a slowly
-            // creeping tip accumulates its travel.  Overwriting it threw that
-            // movement away, which is why a very light stroke came out dotted.
-          }
-        }
-        // A brief loss of contact keeps wasWet and lastInk: the wet tip bridges the
-        // gap on its next touch instead of breaking the line.  Only the brush
-        // leaving the paper entirely clears it, below and in resetBristles().
-      }
-      if (any) {
-        // Fully loaded, wet black ink: density is not tied to pressure.
-        ctx.globalAlpha = 1;
-        ctx.strokeStyle = ink;
-        // 少ない毛でも濡れた毛束として連続して見える太さで描く。
-        // More pressure carries a wetter, slightly wider individual ink thread.
-        ctx.lineCap = brush.inkTaper < .999 ? 'butt' : 'round';
-        // Floor the thread so the end of a harai stays a crisp hairline rather
-        // than fading to nothing before the recorded stroke has finished.
-        ctx.lineWidth = Math.max(MIN_INK_LINE_WIDTH, HAIR_STROKE_WIDTH * brushSettings.thickness
-          * (.18 + brush.inkTaper * .82) * (1 + brush.pressure * .45));
-        ctx.stroke();
-        ctx.lineCap = 'round';
-      }
-      // At an extreme press the root-side of the bundle also reaches the wet
-      // paper.  Four-times-radius root footprints overlap into one mashed mass.
-      // Never stamp the broad root footprint once a harai has started.  Even a
-      // nearly imperceptible lift must switch to tip-only transfer, otherwise a
-      // round blot is left at the release point.
-      if (brush.rootZ <= ROOT_CONTACT_Z && !brush.releasing && brush.inkTaper >= .999) {
-        const rootInkRadius = HAIR_STROKE_WIDTH * brushSettings.thickness * 1.3; // normal radius × (4 × .65)
-        ctx.beginPath();
-        for (let h = 0; h < HAIR_COUNT; h++) {
-          const root = h * NODES;
-          ctx.moveTo(px[root] + rootInkRadius, py[root]);
-          ctx.arc(px[root], py[root], rootInkRadius, 0, Math.PI * 2);
-        }
-        ctx.fillStyle = ink; ctx.globalAlpha = 1; ctx.fill();
-      }
+      ctx.moveTo(inkBody.x, inkBody.y); ctx.lineTo(nextX, nextY);
+      ctx.stroke();
+      inkBody.x = nextX; inkBody.y = nextY;
     }
     function simulate() {
       // Two substeps retain bend history even when PointerEvents arrive sparsely.
@@ -753,6 +757,24 @@
         resetBristles();
 
         const replayRecords = smoothRecordedPressures(strokeRecords);
+        // The ink head trails the handle (the brush is tilted and the tips drag), so
+        // when the finger lifts the head is still that far short of it.  A harai
+        // continues the stroke for that distance as the brush leaves the paper; the
+        // taper then completes exactly where the ink ends instead of cutting off
+        // part-way, blunt.
+        if (haraiDuration > 0) {
+          const last = replayRecords[replayRecords.length - 1];
+          const reach = MAX_HAIR_LENGTH * brushSettings.tiltSin * INK_HEAD_LAG_SCALE + INK_HEAD_LAG_SLACK;
+          const stepLength = .85;
+          const stepTime = replayRecords.length > 1
+            ? Math.max(1, (last.time - replayRecords[0].time) / (replayRecords.length - 1)) : 8;
+          for (let k = 1; k <= Math.ceil(reach / stepLength); k++) {
+            replayRecords.push({
+              ...last, time: last.time + stepTime * k,
+              x: last.x + last.lastMoveX * stepLength * k, y: last.y + last.lastMoveY * stepLength * k
+            });
+          }
+        }
         const lastIndex = replayRecords.length - 1;
         // A harai is a travelled taper, not a clock.  Accumulated paper distance is
         // what the eye actually reads, so the taper is normalised along it: a short
@@ -770,7 +792,7 @@
         // Reach back over whichever is longer: the requested time, or a few brush
         // widths of travel.  A fast flick then still tapers over a visible length.
         const brushWidth = ROOT_RADIUS * 2 * brushSettings.thickness;
-        const taperDistance = Math.min(brushWidth * 6, brushWidth * 3 * (taperDurationMs / 300));
+        const taperDistance = Math.min(brushWidth * 2.4, brushWidth * 1.25 * (taperDurationMs / 300));
         // The entry must survive.  A taper never grows back into the start of the
         // stroke, and never covers more than 70 % of the travelled distance.
         const strokeSpanTime = endTime - replayRecords[0].time;
@@ -795,7 +817,7 @@
         // The width the stroke had immediately before the taper begins.
         const haraiBasePressure = replayRecords[Math.max(0, taperIndex - 1)].pressure;
 
-        let taperCap = 1;
+        let taperCap = 1, directionSeen = false;
         for (let i = 0; i <= lastIndex; i++) {
           const state = replayRecords[i];
           const inHarai = taperDurationMs > 0 && i >= taperIndex;
@@ -814,6 +836,10 @@
             contactTaper = Math.max(HARAI_MIN_CONTACT, Math.pow(taperCap, .65));
           }
           applyRecordedState(state, 1, syntheticPressure, contactTaper);
+          // The live stroke sets its tilted rest shape the moment the first move gives
+          // the brush a direction.  Without the same step here the replay would start
+          // from the default upward pose and swing the bundle round into the stroke.
+          if (state.hasDirection && !directionSeen) { directionSeen = true; resetBristles(); }
           brush.releasing = inHarai;
           simulate();
         }
