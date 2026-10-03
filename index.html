@@ -13,6 +13,11 @@
     canvas { display: block; width: 100%; height: 100%; touch-action: none; }
     #notice { position: fixed; left: 50%; top: env(safe-area-inset-top, 0px); transform: translateX(-50%); width: max-content; max-width: 90vw; padding: 9px 14px; border-radius: 0 0 12px 12px; background: rgba(38,31,23,.78); color: #fffaf0; font-size: 12px; letter-spacing: .08em; text-align: center; pointer-events: none; transition: opacity .5s; }
     #notice.hide { opacity: 0; }
+    /* 診断パネル: 位置・幅・列を固定。ラベル列と値列を分け、値は等幅で右揃えにして、桁が変わっても動かない。 */
+    #contact-info { position: fixed; z-index: 3; left: 8px; top: calc(env(safe-area-inset-top, 0px) + 8px); width: 15.5em; display: grid; grid-template-columns: 4.8em 1fr; gap: 3px 6px; padding: 10px 12px; border-radius: 10px; background: rgba(28,22,16,.86); color: #fffaf0; font-size: 16px; line-height: 1.45; pointer-events: none; }
+    #contact-info span { font-weight: 700; opacity: .8; }
+    #contact-info b { font: 700 17px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; text-align: right; white-space: pre; }
+    #contact-info[hidden] { display: none; }
     #settings { position: fixed; z-index: 5; top: calc(env(safe-area-inset-top, 0px) + 10px); right: 10px; width: min(310px, calc(100vw - 20px)); padding: 16px 16px 14px; border: 1px solid rgba(50,39,27,.22); border-radius: 14px; background: rgba(247,240,226,.97); box-shadow: 0 10px 35px rgba(38,29,20,.25); touch-action: none; }
     #settings[hidden] { display: none; }
     .settings-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; font-weight: 700; letter-spacing: .12em; }
@@ -37,6 +42,14 @@
 <body>
   <canvas id="paper" aria-label="物理シミュレーション毛筆キャンバス"></canvas>
   <div id="notice">筆先を置いてください</div>
+  <div id="contact-info" aria-hidden="true" hidden>
+    <span>幅×高</span><b>-</b>
+    <span>接触</span><b>-</b>
+    <span>範囲</span><b>-</b>
+    <span>面積圧</span><b>-</b>
+    <span>筆圧</span><b>-</b>
+    <span>sensor</span><b>-</b>
+  </div>
   <section id="settings" aria-label="筆設定" hidden>
     <div class="settings-head"><span>筆設定</span><button id="settings-close" type="button" aria-label="設定を閉じる">×</button></div>
     <div class="settings-section">
@@ -72,6 +85,8 @@
     const notice = document.querySelector('#notice');
     const settingsPanel = document.querySelector('#settings');
     const waitingOverlay = document.querySelector('#waiting');
+    const contactInfo = document.querySelector('#contact-info');
+    const contactCells = [...contactInfo.querySelectorAll('b')];
     const HAIR_COUNT = 250;
     const NODES = 5;                 // 根元 + 4節。各節を3Dで計算する。
     const PARTICLES = HAIR_COUNT * NODES;
@@ -86,11 +101,19 @@
     const HARAI_MIN_PRESSURE = .014;
     const HARAI_MIN_CONTACT = .02;
     const MIN_INK_LINE_WIDTH = .5;   // 穂先が消える前に線が見えなくならない最小の墨糸。
-    const CONTACT_SPAN_MIN = 12;     // 接触サイズが取り得る最小レンジ(CSS px)。
+    // iPhoneで実測した接触サイズ sqrt(width*height) の範囲。最小は約24.3pxの1段階、
+    // 強く押すと170px前後まで出る。最初の1サンプルから推定すると、段階値の入力では
+    // 推定が外れて固定されるため、実測値を初期値にして観測で外側へ広げるだけにする。
+    const DEFAULT_CONTACT_MIN = 24, DEFAULT_CONTACT_MAX = 170;
     const MAX_INK_BRIDGE_SQ = 64;    // 一瞬接触が切れた毛を繋ぐ上限(8px)の二乗。
     const MIN_CONTACT_BITE = 6;      // 最軽接触でも中央毛を紙へ食い込ませる深さ。
     const CONTACT_STORE = 'fude.contactRange';
-    let contactMin = 0, contactMax = 0, contactCalibrated = false, showContact = false;
+    // iPhone reports width/height in coarse steps (multiples of ~24.3 px), so a
+    // press arrives as 24 -> 49 -> 97 -> 170 with nothing in between.  A first-order
+    // lag turns each step into a ramp of roughly this duration.
+    const CONTACT_SMOOTH_MS = 120;
+    let smoothSize = 0, smoothTime = 0;
+    let contactMin = DEFAULT_CONTACT_MIN, contactMax = DEFAULT_CONTACT_MAX, showContact = false;
     let dpr = 1, activePointer = null, clearTimer = 0, messageTimer = 0;
     let snapshotValid = false, strokeStart = null, strokeRecords = [], replayingStroke = false;
     let previewX = 0, previewY = 0, previewReady = false, paperReady = false;
@@ -205,11 +228,11 @@
       const saved = JSON.parse(localStorage.getItem(CONTACT_STORE) || 'null');
       if (saved && Number.isFinite(saved.min) && Number.isFinite(saved.max)
         && saved.min > 0 && saved.max > saved.min && saved.max < 400) {
-        contactMin = saved.min; contactMax = saved.max; contactCalibrated = true;
+        contactMin = Math.min(DEFAULT_CONTACT_MIN, saved.min);
+        contactMax = Math.max(DEFAULT_CONTACT_MAX, saved.max);
       }
     } catch (error) { /* private mode or blocked storage: calibrate from scratch */ }
     function saveContactRange() {
-      if (!contactCalibrated) return;
       try { localStorage.setItem(CONTACT_STORE, JSON.stringify({ min: contactMin, max: contactMax })); }
       catch (error) { /* nothing to do: the range just recalibrates next launch */ }
     }
@@ -238,13 +261,14 @@
     const contactToggle = document.querySelector('#show-contact');
     const applyShowContact = () => {
       showContact = contactToggle.checked;
-      if (!showContact) notice.classList.add('hide');
+      contactInfo.hidden = !showContact;
+      for (const cell of contactCells) cell.textContent = '-';
     };
     contactToggle.addEventListener('change', applyShowContact);
     applyShowContact();
     document.querySelector('#settings-close').addEventListener('click', () => { settingsPanel.hidden = true; });
     document.querySelector('#reset-contact').addEventListener('click', () => {
-      contactMin = 0; contactMax = 0; contactCalibrated = false;
+      contactMin = DEFAULT_CONTACT_MIN; contactMax = DEFAULT_CONTACT_MAX;
       try { localStorage.removeItem(CONTACT_STORE); } catch (error) { /* nothing stored */ }
       say('筆圧レンジを初期化しました。次の一画の接触を基準に取り直します', 2800);
     });
@@ -298,20 +322,33 @@
       return brush.nativePressureSeen ? pressure : null;
     }
     // Width and height are used when the device does not expose usable pressure.
-    function pressureFromContact(e, size) {
+    function smoothContactSize(size, time, restart) {
+      if (restart || !smoothTime) smoothSize = size;
+      else {
+        const elapsed = Math.max(0, Math.min(250, time - smoothTime));
+        smoothSize += (size - smoothSize) * (1 - Math.exp(-elapsed / CONTACT_SMOOTH_MS));
+      }
+      smoothTime = time;
+      return smoothSize;
+    }
+    function pressureFromContact(e, size, restart = false) {
       const suppliedPressure = nativePressure(e);
       // Calibrate against the contact sizes this finger really produces.  The old
       // fixed 2–26 px window was a stylus range: a fingertip already starts near
       // 25 px, so every touch saturated it and pressing lighter changed nothing.
       // The first sample of the session is assumed to be a middling press; real
       // extremes then widen the range from both ends.
-      if (!contactCalibrated) {
-        contactMin = size * .80; contactMax = size * 1.12; contactCalibrated = true;
-      }
-      contactMin = Math.min(contactMin, size);
-      contactMax = Math.max(contactMax, size);
-      const span = Math.max(CONTACT_SPAN_MIN, contactMax - contactMin);
-      const areaPressure = Math.max(0, Math.min(1, (size - contactMin) / span));
+      // The range follows the same smoothed value that is mapped.  Feeding it the raw
+      // size made a jump from 49 to 97 widen the range immediately while the smoothed
+      // value was still low, so pressing harder briefly read as pressing lighter.
+      const eased = smoothContactSize(size, e.timeStamp, restart);
+      contactMin = Math.min(contactMin, eased);
+      contactMax = Math.max(contactMax, eased);
+      // Contact steps are multiplicative (24 -> 49 -> 97 -> 170), so the mapping is
+      // logarithmic: each step then adds the same amount of pressure.  A linear map
+      // put 49 at 17 % and crushed everything below the firmest press into hairlines.
+      const areaPressure = Math.max(0, Math.min(1,
+        Math.log(eased / contactMin) / Math.log(Math.max(contactMax, contactMin * 1.5) / contactMin)));
       // 0–1 s: entry setting. 1–2 s: smoothly migrate to the writing setting.
       // After 2 s the writing balance is used exclusively.
       const strokeAge = performance.now() - brush.startedAt;
@@ -842,15 +879,15 @@
       brush.rootZ = rootHeightForPressure(brush.pressure);
     }
     function reportContact(sample, size, areaPressure) {
-      // The calibrated range is the number that matters when a stroke will not get
-      // thin: if min and max are nearly equal, the finger never varied its contact.
-      notice.textContent = 'w' + Number(sample.width).toFixed(1) + '×h' + Number(sample.height).toFixed(1)
-        + ' 接触' + size.toFixed(1) + ' 範囲' + contactMin.toFixed(1) + '〜' + contactMax.toFixed(1)
-        + ' 面積圧' + areaPressure.toFixed(2) + ' 筆圧' + brush.pressure.toFixed(2)
-        + ' sensor' + Number(sample.pressure).toFixed(2) + (brush.nativePressureSeen ? '使用' : '未使用');
-      notice.classList.remove('hide');
-      clearTimeout(messageTimer);
+      const f = (value, digits) => Number(value).toFixed(digits);
+      contactCells[0].textContent = f(sample.width, 1) + ' x ' + f(sample.height, 1);
+      contactCells[1].textContent = f(size, 1) + ' > ' + f(smoothSize, 1);
+      contactCells[2].textContent = f(contactMin, 0) + ' - ' + f(contactMax, 0);
+      contactCells[3].textContent = f(areaPressure, 2);
+      contactCells[4].textContent = f(brush.pressure, 2);
+      contactCells[5].textContent = f(sample.pressure, 2) + (brush.nativePressureSeen ? ' 使用' : ' 未使用');
     }
+
     function advancePointerSample(sample) {
       const size = contactSize(sample);
       if (size === null) return;
@@ -925,7 +962,7 @@
       brush.turnStrength = 0;
       brush.inkTaper = 1;
       previewX = brush.x; previewY = brush.y; previewReady = false;
-      setBrushHeight(pressureFromContact(e, size), 0);
+      setBrushHeight(pressureFromContact(e, size, true), 0);
       brush.active = true; brush.drawEnabled = false;
       // With recompute off nothing is ever replayed, so skip the full-canvas copy
       // and the per-step recording entirely: live mode must stay as light as possible.
