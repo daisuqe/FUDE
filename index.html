@@ -27,7 +27,7 @@
     .check-row input { width: 20px; height: 20px; accent-color: #34271c; }
     .settings-note { margin: 7px 0 0; color: #6f6252; font-size: 11px; line-height: 1.65; }
     #settings input[type="range"] { width: 100%; accent-color: #34271c; touch-action: pan-x; }
-    #blank-paper { width: 100%; margin-top: 7px; padding: 11px; border: 1px solid rgba(50,39,27,.3); border-radius: 9px; background: #fffaf0; color: #2e261e; font: inherit; font-weight: 700; }
+    #blank-paper, #reset-contact { width: 100%; margin-top: 7px; padding: 11px; border: 1px solid rgba(50,39,27,.3); border-radius: 9px; background: #fffaf0; color: #2e261e; font: inherit; font-weight: 700; }
     #waiting { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: rgba(17,14,11,.62); color: #fffaf0; font-size: 22px; font-weight: 700; letter-spacing: .3em; }
     #waiting[hidden] { display: none; }
     #rotate { display: none; position: fixed; inset: 0; z-index: 4; align-items: center; justify-content: center; background: #e9e1d2; color: #302820; font-size: 16px; text-align: center; line-height: 2; }
@@ -52,6 +52,13 @@
       <label class="single-row"><span>ハライ</span><span class="angle-control"><input id="harai-duration" type="range" min="0" max="100" value="30"><span class="range-ends"><span>0秒</span><span>1秒</span></span></span></label>
       <label class="check-row"><input id="final-recompute" type="checkbox" checked><span>最後に再計算</span></label>
       <p class="settings-note">オンは指を離した後に全画を毛の物理で清書します。オフはライブ描画をそのまま確定するため、ハライはオンの時だけ効きます。</p>
+    </div>
+    <div class="settings-section">
+      <h2>診断</h2>
+      <label class="check-row"><input id="show-contact" type="checkbox"><span>接触情報を表示</span></label>
+      <p class="settings-note">書いている間、端末が報告する接触幅・高さと、そこから計算した筆圧を画面上部に出します。</p>
+      <button id="reset-contact" type="button">筆圧レンジを初期化</button>
+      <p class="settings-note">接触サイズの軽い端・強い端は書きながら自動で覚えます。覚えた範囲を捨てて取り直す時に押します。</p>
     </div>
     <button id="blank-paper" type="button">白紙</button>
   </section>
@@ -79,6 +86,11 @@
     const HARAI_MIN_PRESSURE = .014;
     const HARAI_MIN_CONTACT = .02;
     const MIN_INK_LINE_WIDTH = .5;   // 穂先が消える前に線が見えなくならない最小の墨糸。
+    const CONTACT_SPAN_MIN = 12;     // 接触サイズが取り得る最小レンジ(CSS px)。
+    const MAX_INK_BRIDGE_SQ = 64;    // 一瞬接触が切れた毛を繋ぐ上限(8px)の二乗。
+    const MIN_CONTACT_BITE = 6;      // 最軽接触でも中央毛を紙へ食い込ませる深さ。
+    const CONTACT_STORE = 'fude.contactRange';
+    let contactMin = 0, contactMax = 0, contactCalibrated = false, showContact = false;
     let dpr = 1, activePointer = null, clearTimer = 0, messageTimer = 0;
     let snapshotValid = false, strokeStart = null, strokeRecords = [], replayingStroke = false;
     let previewX = 0, previewY = 0, previewReady = false, paperReady = false;
@@ -170,7 +182,7 @@
     })();
     const brush = {
       active: false, drawEnabled: false, x: 0, y: 0, pressure: 0,
-      rootZ: 112 * LENGTH_SCALE, minSize: 0, nativePressureSeen: false,
+      rootZ: 112 * LENGTH_SCALE, nativePressureSeen: false,
       inputX: 0, inputY: 0, inputTime: 0, dirX: 0, dirY: -1, hasDirection: false,
       sensorPressure: 0, startedAt: 0, releasing: false,
       lastMoveX: 0, lastMoveY: 1, turnStrength: 0, inkTaper: 1
@@ -187,6 +199,20 @@
       tiltCos: Math.cos(25 * Math.PI / 180)
     };
 
+    // The calibrated contact range is kept across reloads: recalibrating on every
+    // launch would make the first stroke of each session read as a middling press.
+    try {
+      const saved = JSON.parse(localStorage.getItem(CONTACT_STORE) || 'null');
+      if (saved && Number.isFinite(saved.min) && Number.isFinite(saved.max)
+        && saved.min > 0 && saved.max > saved.min && saved.max < 400) {
+        contactMin = saved.min; contactMax = saved.max; contactCalibrated = true;
+      }
+    } catch (error) { /* private mode or blocked storage: calibrate from scratch */ }
+    function saveContactRange() {
+      if (!contactCalibrated) return;
+      try { localStorage.setItem(CONTACT_STORE, JSON.stringify({ min: contactMin, max: contactMax })); }
+      catch (error) { /* nothing to do: the range just recalibrates next launch */ }
+    }
     function bindRange(id, update) {
       const input = document.querySelector(id);
       const apply = () => update(Number(input.value));
@@ -209,7 +235,19 @@
     const applyRecompute = () => { brushSettings.finalRecompute = recomputeToggle.checked; };
     recomputeToggle.addEventListener('change', applyRecompute);
     applyRecompute();
+    const contactToggle = document.querySelector('#show-contact');
+    const applyShowContact = () => {
+      showContact = contactToggle.checked;
+      if (!showContact) notice.classList.add('hide');
+    };
+    contactToggle.addEventListener('change', applyShowContact);
+    applyShowContact();
     document.querySelector('#settings-close').addEventListener('click', () => { settingsPanel.hidden = true; });
+    document.querySelector('#reset-contact').addEventListener('click', () => {
+      contactMin = 0; contactMax = 0; contactCalibrated = false;
+      try { localStorage.removeItem(CONTACT_STORE); } catch (error) { /* nothing stored */ }
+      say('筆圧レンジを初期化しました。次の一画の接触を基準に取り直します', 2800);
+    });
     document.querySelector('#blank-paper').addEventListener('click', () => {
       if (confirm('紙を白紙に戻しますか？')) { clearPaper(); settingsPanel.hidden = true; }
     });
@@ -262,10 +300,18 @@
     // Width and height are used when the device does not expose usable pressure.
     function pressureFromContact(e, size) {
       const suppliedPressure = nativePressure(e);
-      brush.minSize = Math.min(brush.minSize, size);
-      const absolute = Math.max(0, Math.min(1, (size - 2) / 24));
-      const relative = Math.max(0, Math.min(1, (size - brush.minSize) / Math.max(1.1, brush.minSize * .10)));
-      const areaPressure = Math.max(absolute, relative);
+      // Calibrate against the contact sizes this finger really produces.  The old
+      // fixed 2–26 px window was a stylus range: a fingertip already starts near
+      // 25 px, so every touch saturated it and pressing lighter changed nothing.
+      // The first sample of the session is assumed to be a middling press; real
+      // extremes then widen the range from both ends.
+      if (!contactCalibrated) {
+        contactMin = size * .80; contactMax = size * 1.12; contactCalibrated = true;
+      }
+      contactMin = Math.min(contactMin, size);
+      contactMax = Math.max(contactMax, size);
+      const span = Math.max(CONTACT_SPAN_MIN, contactMax - contactMin);
+      const areaPressure = Math.max(0, Math.min(1, (size - contactMin) / span));
       // 0–1 s: entry setting. 1–2 s: smoothly migrate to the writing setting.
       // After 2 s the writing balance is used exclusively.
       const strokeAge = performance.now() - brush.startedAt;
@@ -282,7 +328,10 @@
       const requestedHeight = 116 * (1 - pressure) * LENGTH_SCALE;
       // Speed thinning may lift the bundle, but never beyond the reach of its
       // longest central fibre. This keeps a continuous hairline on the paper.
-      const centralContactHeight = Math.max(0, MAX_HAIR_LENGTH * brushSettings.tiltCos - .35);
+      // The fibres have to bite into the paper rather than graze it: parked exactly
+      // at their bare reach, contact flickered between one hair and none, and every
+      // empty frame cleared the wet state and broke a light stroke into dots.
+      const centralContactHeight = Math.max(0, MAX_HAIR_LENGTH * brushSettings.tiltCos - MIN_CONTACT_BITE);
       return Math.min(requestedHeight, centralContactHeight);
     }
     function rootPosition(hair, x, y, z) {
@@ -535,12 +584,18 @@
         const hasInkSupply = Math.hypot(px[tip] - centreX, py[tip] - centreY) <= inkEnvelope
           || h === closestTip;
         if (pz[tip] <= PAPER_Z + .08 && hasVerticalSupport && hasInkSupply) {
-          if (wasWet[h]) {
+          if (!wasWet[h]) {
+            lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 1;
+          } else {
             const dx = px[tip] - lastInkX[h], dy = py[tip] - lastInkY[h];
-            // A zero-length Canvas stroke still paints its round cap as a dot.
-            // Do not transfer ink until this individual tip has genuinely moved;
-            // otherwise stationary root positions outline the brush as a circle.
-            if (dx * dx + dy * dy > .0225) {
+            const travelSq = dx * dx + dy * dy;
+            if (travelSq > MAX_INK_BRIDGE_SQ) {
+              // Too far to be one continuous wet trail: start a new segment here.
+              lastInkX[h] = px[tip]; lastInkY[h] = py[tip];
+            } else if (travelSq > .0225) {
+              // A zero-length Canvas stroke still paints its round cap as a dot.
+              // Do not transfer ink until this individual tip has genuinely moved;
+              // otherwise stationary root positions outline the brush as a circle.
               let startX = lastInkX[h], startY = lastInkY[h];
               if (brush.inkTaper < .999) {
                 const fromCentreX = startX - centreX, fromCentreY = startY - centreY;
@@ -551,12 +606,16 @@
                 }
               }
               ctx.moveTo(startX, startY); ctx.lineTo(px[tip], py[tip]); any = true;
+              lastInkX[h] = px[tip]; lastInkY[h] = py[tip];
             }
+            // Below the threshold lastInk is deliberately left alone so a slowly
+            // creeping tip accumulates its travel.  Overwriting it threw that
+            // movement away, which is why a very light stroke came out dotted.
           }
-          lastInkX[h] = px[tip]; lastInkY[h] = py[tip]; wasWet[h] = 1;
-        } else {
-          wasWet[h] = 0;
         }
+        // A brief loss of contact keeps wasWet and lastInk: the wet tip bridges the
+        // gap on its next touch instead of breaking the line.  Only the brush
+        // leaving the paper entirely clears it, below and in resetBristles().
       }
       if (any) {
         // Fully loaded, wet black ink: density is not tied to pressure.
@@ -782,6 +841,16 @@
       brush.pressure = brush.sensorPressure * entry;
       brush.rootZ = rootHeightForPressure(brush.pressure);
     }
+    function reportContact(sample, size, areaPressure) {
+      // The calibrated range is the number that matters when a stroke will not get
+      // thin: if min and max are nearly equal, the finger never varied its contact.
+      notice.textContent = 'w' + Number(sample.width).toFixed(1) + '×h' + Number(sample.height).toFixed(1)
+        + ' 接触' + size.toFixed(1) + ' 範囲' + contactMin.toFixed(1) + '〜' + contactMax.toFixed(1)
+        + ' 面積圧' + areaPressure.toFixed(2) + ' 筆圧' + brush.pressure.toFixed(2)
+        + ' sensor' + Number(sample.pressure).toFixed(2) + (brush.nativePressureSeen ? '使用' : '未使用');
+      notice.classList.remove('hide');
+      clearTimeout(messageTimer);
+    }
     function advancePointerSample(sample) {
       const size = contactSize(sample);
       if (size === null) return;
@@ -791,6 +860,7 @@
       const speed = distance / elapsed; // CSS pixels per millisecond
       const inputPressure = pressureFromContact(sample, size);
       setBrushHeight(inputPressure, speed);
+      if (showContact) reportContact(sample, size, inputPressure);
       if (distance > .35) {
         const directionX = dx / distance, directionY = dy / distance;
         if (brush.hasDirection && directionX * brush.lastMoveX + directionY * brush.lastMoveY < .72) {
@@ -847,7 +917,7 @@
       }
       canvas.setPointerCapture(e.pointerId);
       activePointer = e.pointerId;
-      brush.x = e.clientX; brush.y = e.clientY; brush.minSize = size; brush.nativePressureSeen = false;
+      brush.x = e.clientX; brush.y = e.clientY; brush.nativePressureSeen = false;
       brush.inputX = e.clientX; brush.inputY = e.clientY; brush.inputTime = e.timeStamp;
       brush.dirX = 0; brush.dirY = -1; brush.hasDirection = false;
       brush.startedAt = performance.now(); brush.releasing = false;
@@ -876,6 +946,7 @@
       cancelClear();
       if (activePointer === e.pointerId) {
         activePointer = null;
+        saveContactRange();
         // Off means off: the live hair rendering is final.  A harai taper can only
         // be built once the stroke has ended, so it belongs to the recompute path.
         if (e.type === 'pointerup' && brush.drawEnabled && brushSettings.finalRecompute) {
