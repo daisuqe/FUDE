@@ -53,14 +53,11 @@
   <section id="settings" aria-label="筆設定" hidden>
     <div class="settings-head"><span>筆設定</span><button id="settings-close" type="button" aria-label="設定を閉じる">×</button></div>
     <div class="settings-section">
-      <h2>書き始め</h2>
-      <label class="balance-row"><span>筆圧</span><input id="start-balance" type="range" min="0" max="100" value="100"><span>押半径</span></label>
-    </div>
-    <div class="settings-section">
-      <h2>書き中</h2>
-      <label class="balance-row"><span>筆圧</span><input id="write-balance" type="range" min="0" max="100" value="30"><span>押半径</span></label>
+      <h2>筆</h2>
+      <label class="balance-row"><span>筆圧</span><input id="pressure-balance" type="range" min="0" max="100" value="30"><span>押半径</span></label>
       <label class="single-row"><span>太さ</span><input id="thickness" type="range" min="0" max="100" value="50"></label>
       <label class="single-row"><span>早細さ</span><input id="speed-thinness" type="range" min="0" max="100" value="85"></label>
+      <label class="single-row"><span>水分</span><span class="angle-control"><input id="moisture" type="range" min="0" max="100" value="85"><span class="range-ends"><span>少ない</span><span>多い</span></span></span></label>
       <label class="single-row"><span>筆角度</span><span class="angle-control"><input id="brush-angle" type="range" min="0" max="90" value="25"><span class="range-ends"><span>0° 垂直</span><span>90° 進行方向</span></span></span></label>
       <label class="single-row"><span>ハライ</span><span class="angle-control"><input id="harai-duration" type="range" min="0" max="100" value="30"><span class="range-ends"><span>0秒</span><span>1秒</span></span></span></label>
       <label class="check-row"><input id="final-recompute" type="checkbox" checked><span>最後に再計算</span></label>
@@ -104,6 +101,7 @@
     // 推定が外れて固定されるため、実測値を初期値にして観測で外側へ広げるだけにする。
     const DEFAULT_CONTACT_MIN = 24, DEFAULT_CONTACT_MAX = 170;
     // 穂先(濡れた墨の頭)の描き方。
+    const ENTRY_DISTANCE = 100;         // 入りの太さが出そろうまでの距離(px)。1秒とどちらか早い方。
     const INK_SPREAD_PERCENTILE = .97;  // 届く毛の根元の横方向の広がりの何%点を幅にするか(根元は滑らかな分布なので外れ値はない)。
     const INK_SPREAD_GAIN = 1.0;        // その広がりを墨の半径へ換算する係数。
     const INK_ALONG_FOLLOW = .06;       // 毛先の遅れ(進行方向)へ追従する速さ。小さいほど滑らか。
@@ -111,13 +109,19 @@
     const INK_RADIUS_FOLLOW = .10;      // 物理から求めた半径への追従の速さ(接地本数の増減ならし)。
     // 輪郭の傾きの上限(進んだ距離1pxあたりに半径が増減できる量)。接地本数が増減しても
     // 輪郭にこぶができず、細い穂先から目の形に膨らんで、また細く抜ける。
-    const INK_RADIUS_RISE_SLOPE = .20;
+    const INK_RADIUS_RISE_SLOPE = .40;
     const INK_RADIUS_FALL_SLOPE = .32;
     const INK_MIN_PENETRATION = 3.5;    // 毛が紙へ食い込む深さがこれ未満なら墨を出さない(px)。
     const INK_WET_REACH = 16;           // 毛先がこの高さ(px)までの浮きなら、墨は表面張力で紙とつながる。
     const INK_HANDLE_FOLLOW = .25;      // 指の位置のなだらかさ。指先の検出ノイズで頭が震えないように。
     const INK_HEAD_LAG_SCALE = .85;     // 頭が指から遅れられる距離 = 最長毛 × sin(筆角度) × この値 + 余裕。
     const INK_HEAD_LAG_SLACK = 4;
+    // 水分が少ないと、体から細い毛がはみ出す(ばらつく毛)。急な曲がりと強い押し込みで増える。
+    const STRAY_RANK_GAIN = .15;        // 強さ1のとき、毛の順位の上位何割(目安)がほどけるか。
+    const STRAY_BASE = .22;             // 曲がりも押し込みも無いときの、強さの基準(水分が最小のとき)。
+    const STRAY_TURN_MEMORY = .985;     // 急な曲がりの影響が残る長さ(ステップごとの減衰)。
+    const STRAY_ANCHOR_FOLLOW = .12;    // ばらつく毛の基準点を、穂先の位置へどれだけ追従させるか。小さいほど毛が滑らか。
+    const STRAY_FRAY_MEMORY = .994;     // ほどけた毛が尾を引く長さ(ステップごとの減衰。約0.85px/ステップで約140px)。
     const MAX_INK_RADIUS_SCALE = 1.15;  // 半径の上限 = 筆束の半径 × 太さ × この値。
     const MIN_INK_RADIUS = .45;         // 穂先の最小半径(線の太さ0.9px)。
     const MIN_CONTACT_BITE = 6;      // 最軽接触でも中央毛を紙へ食い込ませる深さ。
@@ -220,11 +224,11 @@
       rootZ: 112 * LENGTH_SCALE, nativePressureSeen: false,
       inputX: 0, inputY: 0, inputTime: 0, dirX: 0, dirY: -1, hasDirection: false,
       sensorPressure: 0, startedAt: 0, releasing: false,
-      lastMoveX: 0, lastMoveY: 1, turnStrength: 0, inkTaper: 1
+      lastMoveX: 0, lastMoveY: 1, turnStrength: 0, inkTaper: 1, travel: 0
     };
     const brushSettings = {
-      startBalance: 1,
-      writeBalance: .30,
+      balance: .30,
+      moisture: .85,
       thickness: 1,
       speedThinness: .85,
       haraiDuration: .30,
@@ -254,8 +258,8 @@
       input.addEventListener('input', apply);
       apply();
     }
-    bindRange('#start-balance', value => { brushSettings.startBalance = value / 100; });
-    bindRange('#write-balance', value => { brushSettings.writeBalance = value / 100; });
+    bindRange('#pressure-balance', value => { brushSettings.balance = value / 100; });
+    bindRange('#moisture', value => { brushSettings.moisture = value / 100; });
     bindRange('#thickness', value => { brushSettings.thickness = .4 + value * .012; });
     bindRange('#speed-thinness', value => { brushSettings.speedThinness = value / 100; });
     bindRange('#brush-angle', value => {
@@ -361,15 +365,11 @@
       // put 49 at 17 % and crushed everything below the firmest press into hairlines.
       const areaPressure = Math.max(0, Math.min(1,
         Math.log(eased / contactMin) / Math.log(Math.max(contactMax, contactMin * 1.5) / contactMin)));
-      // 0–1 s: entry setting. 1–2 s: smoothly migrate to the writing setting.
-      // After 2 s the writing balance is used exclusively.
-      const strokeAge = performance.now() - brush.startedAt;
-      const transition = Math.max(0, Math.min(1, (strokeAge - 1000) / 1000));
-      const radiusWeight = brushSettings.startBalance
-        + (brushSettings.writeBalance - brushSettings.startBalance) * transition;
+      // One mixing rule for the whole stroke: the entry is shaped by the one-second
+      // ramp in setBrushHeight(), so it needs no separate pressure algorithm.
       const combinedPressure = suppliedPressure === null
         ? areaPressure
-        : suppliedPressure * (1 - radiusWeight) + areaPressure * radiusWeight;
+        : suppliedPressure * (1 - brushSettings.balance) + areaPressure * brushSettings.balance;
       const normalized = Math.max(0, Math.min(1, (combinedPressure - .10) / .80));
       return Math.max(.008, Math.pow(normalized, 1.65));
     }
@@ -591,9 +591,82 @@
     // body still comes from the physics: its width is the sideways spread of the tips
     // that really touch the paper, and its position trails the handle by the lag the
     // tips really have.  Pressure only changes which tips reach the paper.
-    const inkBody = { ready: false, x: 0, y: 0, along: 0, side: 0, radius: 0, shape: 0, lost: 0, hx: 0, hy: 0 };
+    const inkBody = { ready: false, x: 0, y: 0, along: 0, side: 0, radius: 0, shape: 0, lost: 0, hx: 0, hy: 0, turn: 0, fray: 0, forward: 0, furthest: 0, sx: 0, sy: 0 };
     const spreadBuffer = new Float32Array(HAIR_COUNT);
-    function resetInk() { inkBody.ready = false; inkBody.lost = 0; }
+    // Fixed personality of every fibre: how readily it frays (rim fibres most), which
+    // side it strays to, and how far out and how far behind it hangs.
+    const strayRank = new Float32Array(HAIR_COUNT), strayOut = new Float32Array(HAIR_COUNT);
+    const strayBehind = new Float32Array(HAIR_COUNT), straySign = new Int8Array(HAIR_COUNT);
+    const strayLastX = new Float32Array(HAIR_COUNT), strayLastY = new Float32Array(HAIR_COUNT);
+    const strayOn = new Uint8Array(HAIR_COUNT);
+    for (let h = 0; h < HAIR_COUNT; h++) {
+      strayRank[h] = .35 * randomAt(h, 7) + .65 * hairs[h].bundleRadius;
+      strayOut[h] = randomAt(h, 8); strayBehind[h] = randomAt(h, 9);
+      straySign[h] = randomAt(h, 10) < .5 ? -1 : 1;
+    }
+    function resetInk() {
+      inkBody.ready = false; inkBody.lost = 0; inkBody.turn = 0; inkBody.fray = 0; inkBody.forward = 0; inkBody.furthest = 0; inkBody.strayAnchored = false;
+      strayOn.fill(0);
+    }
+    // Dry fibres break away from the wet bundle and trail beside it as fine hairlines.
+    // They hang off the edge of the body, so they follow every curve the body makes,
+    // and a sharp turn swings them outward.  Moisture keeps them bound: wet = none.
+    function drawStrays(rawX, rawY, sideX, sideY, radius) {
+      // A hair is far lighter than the head and does not share its fingertip jitter,
+      // so it hangs from a smoothed copy of the head's position.
+      if (!inkBody.strayAnchored) { inkBody.sx = rawX; inkBody.sy = rawY; inkBody.strayAnchored = true; }
+      inkBody.sx += (rawX - inkBody.sx) * STRAY_ANCHOR_FOLLOW;
+      inkBody.sy += (rawY - inkBody.sy) * STRAY_ANCHOR_FOLLOW;
+      const headX = inkBody.sx, headY = inkBody.sy;
+      const dryness = 1 - brushSettings.moisture;
+      const press = Math.max(0, Math.min(1, (brush.pressure - .55) / .45));
+      const event = Math.max(inkBody.turn, Math.pow(press, 1.3));
+      // A fibre that has come loose stays loose for a while: the strength decays
+      // slowly instead of following each step, so strays trail as long hairlines
+      // rather than flickering on and off as short tufts.
+      inkBody.fray = Math.max(dryness * (STRAY_BASE + (1 - STRAY_BASE) * event), inkBody.fray * STRAY_FRAY_MEMORY);
+      const strength = inkBody.fray * Math.pow(Math.max(.02, brush.inkTaper), 2);
+      if (strength < .004) { strayOn.fill(0); return; }
+      // Rank 1 is the most fray-prone fibre.  A stronger event reaches further down.
+      const threshold = 1 - strength * STRAY_RANK_GAIN;
+      ctx.beginPath();
+      let any = false;
+      for (let h = 0; h < HAIR_COUNT; h++) {
+        if (strayRank[h] < threshold) { strayOn[h] = 0; continue; }
+        const out = straySign[h] * (radius * .92 + (.15 + .85 * strayOut[h]) * strength * radius * 1.1 + .6);
+        const behind = strayBehind[h] * (radius * .5 + 5) * (.5 + strength);
+        const x = headX + sideX * out - brush.dirX * behind, y = headY + sideY * out - brush.dirY * behind;
+        if (strayOn[h]) {
+          const dx = x - strayLastX[h], dy = y - strayLastY[h], d2 = dx * dx + dy * dy;
+          // Only a hair that has actually moved leaves a mark, and never a long jump.
+          if (d2 > .09 && d2 < 400) { ctx.moveTo(strayLastX[h], strayLastY[h]); ctx.lineTo(x, y); any = true; }
+          else if (d2 < .09) continue;
+        }
+        strayLastX[h] = x; strayLastY[h] = y; strayOn[h] = 1;
+      }
+      if (any) {
+        ctx.globalAlpha = 1; ctx.strokeStyle = ink; ctx.lineCap = 'round';
+        ctx.lineWidth = Math.max(.7, HAIR_STROKE_WIDTH * brushSettings.thickness * .7);
+        ctx.stroke();
+      }
+    }
+    // When the finger lifts, the head is still the tilt-lag short of the handle.  The
+    // ink should reach where the finger left the paper, so the head runs on to the
+    // handle at a steady width.  (A harai instead continues the stroke itself.)
+    function settleInk() {
+      if (!inkBody.ready) return;
+      const sideX = -brush.dirY, sideY = brush.dirX;
+      const radius = Math.max(MIN_INK_RADIUS, inkBody.shape);
+      ctx.globalAlpha = 1; ctx.strokeStyle = ink; ctx.lineCap = 'round'; ctx.lineWidth = radius * 2;
+      for (let k = 0; k < 60 && Math.abs(inkBody.along) > .4; k++) {
+        inkBody.along *= .88;
+        const nextX = inkBody.hx + brush.dirX * inkBody.along + sideX * inkBody.side;
+        const nextY = inkBody.hy + brush.dirY * inkBody.along + sideY * inkBody.side;
+        if ((nextX - inkBody.x) ** 2 + (nextY - inkBody.y) ** 2 < .04) continue;
+        ctx.beginPath(); ctx.moveTo(inkBody.x, inkBody.y); ctx.lineTo(nextX, nextY); ctx.stroke();
+        inkBody.x = nextX; inkBody.y = nextY;
+      }
+    }
     function depositInk() {
       // Which hairs can bridge the distance to the paper depends only on the handle's
       // height: only the vertical projection of a tilted fibre counts, so as the
@@ -643,12 +716,15 @@
         + HAIR_STROKE_WIDTH * brushSettings.thickness * .5;
 
       if (!inkBody.ready) {
-        // A stroke always begins as a fine point and swells from there.
-        inkBody.along = meanAlong; inkBody.side = meanSide; inkBody.radius = rawRadius;
+        // A stroke begins as a fine point, and where the finger touched down.  The
+        // tilted brush's tips really do rest behind the handle, but ink that starts
+        // a tip-length before the touch point reads as a long, drawn-out entry.  The
+        // head takes up its trailing distance as it moves (INK_ALONG_FOLLOW).
+        inkBody.along = 0; inkBody.side = meanSide; inkBody.radius = rawRadius;
         inkBody.shape = MIN_INK_RADIUS;
         inkBody.hx = brush.x; inkBody.hy = brush.y;
-        inkBody.x = brush.x + brush.dirX * meanAlong + sideX * meanSide;
-        inkBody.y = brush.y + brush.dirY * meanAlong + sideY * meanSide;
+        inkBody.x = brush.x + sideX * meanSide;
+        inkBody.y = brush.y + sideY * meanSide;
         inkBody.ready = true;
         return;                                  // first contact never stamps a dot
       }
@@ -658,14 +734,20 @@
       // tension keeps the wet head within a tilt-dependent reach of the handle, or the
       // head would stall while the finger travels on and the body would be cut off.
       const maxLag = MAX_HAIR_LENGTH * brushSettings.tiltSin * INK_HEAD_LAG_SCALE + INK_HEAD_LAG_SLACK;
-      inkBody.along += (Math.max(meanAlong, -maxLag) - inkBody.along) * INK_ALONG_FOLLOW;
       inkBody.side += (meanSide - inkBody.side) * INK_SIDE_FOLLOW;
       inkBody.radius += (rawRadius - inkBody.radius) * INK_RADIUS_FOLLOW;
       // The head hangs from a lightly smoothed handle position.  Fingertip tracking
       // noise of a few tenths of a pixel would otherwise shake the head back and
       // forth, and that shaking would count as distance travelled.
+      const handleX = inkBody.hx, handleY = inkBody.hy;
       inkBody.hx += (brush.x - inkBody.hx) * INK_HANDLE_FOLLOW;
       inkBody.hy += (brush.y - inkBody.hy) * INK_HANDLE_FOLLOW;
+      // The head may fall behind the handle only as fast as the handle advances.  The
+      // stroke begins with the head on the handle; letting it take up its trailing
+      // distance faster than that made it run backwards from the touch point.
+      const handleForward = Math.max(0, (inkBody.hx - handleX) * brush.dirX + (inkBody.hy - handleY) * brush.dirY);
+      const easedAlong = inkBody.along + (Math.max(meanAlong, -maxLag) - inkBody.along) * INK_ALONG_FOLLOW;
+      inkBody.along = Math.max(easedAlong, inkBody.along - handleForward);
       const nextX = inkBody.hx + brush.dirX * inkBody.along + sideX * inkBody.side;
       const nextY = inkBody.hy + brush.dirY * inkBody.along + sideY * inkBody.side;
       const dx = nextX - inkBody.x, dy = nextY - inkBody.y;
@@ -675,8 +757,15 @@
       // The outline may only swell or narrow so fast per pixel of travel: whatever
       // the touching hairs do from step to step, the edge stays a smooth curve.
       const ceiling = MAX_INK_RADIUS_SCALE * ROOT_RADIUS * brushSettings.thickness;
-      inkBody.shape = Math.max(inkBody.shape - INK_RADIUS_FALL_SLOPE * travelled - .02,
-        Math.min(inkBody.shape + INK_RADIUS_RISE_SLOPE * travelled + .02, Math.min(ceiling, inkBody.radius)));
+      // Distance counts only where the head has newly advanced.  Its position is
+      // never perfectly still: a few tenths of a pixel of fingertip noise makes it
+      // shuffle back and forth, and counting that shuffle as travel let the radius
+      // swell to a blob within a few pixels of the touch point.
+      inkBody.forward += dx * brush.dirX + dy * brush.dirY;
+      const fresh = Math.max(0, inkBody.forward - inkBody.furthest);
+      inkBody.furthest = Math.max(inkBody.furthest, inkBody.forward);
+      inkBody.shape = Math.max(inkBody.shape - INK_RADIUS_FALL_SLOPE * fresh - .002,
+        Math.min(inkBody.shape + INK_RADIUS_RISE_SLOPE * fresh + .002, Math.min(ceiling, inkBody.radius)));
       // A harai thins the head to a point on top of that; the touching hairs thin it too.
       const radius = Math.max(MIN_INK_RADIUS, inkBody.shape * Math.pow(Math.max(.02, brush.inkTaper), 1.1));
       ctx.globalAlpha = 1;
@@ -687,6 +776,8 @@
       ctx.moveTo(inkBody.x, inkBody.y); ctx.lineTo(nextX, nextY);
       ctx.stroke();
       inkBody.x = nextX; inkBody.y = nextY;
+      inkBody.turn = Math.max(brush.turnStrength, inkBody.turn * STRAY_TURN_MEMORY);
+      if (brushSettings.moisture < .999) drawStrays(nextX, nextY, sideX, sideY, radius);
     }
     function simulate() {
       // Two substeps retain bend history even when PointerEvents arrive sparsely.
@@ -843,6 +934,8 @@
           brush.releasing = inHarai;
           simulate();
         }
+        // No harai: nothing continues the stroke, so let the head reach the handle.
+        if (taperDurationMs <= 0) settleInk();
       } finally {
         brush.active = false; brush.drawEnabled = false; brush.releasing = false;
         brush.inkTaper = 1;
@@ -899,8 +992,12 @@
       const speedLift = Math.min(.56,
         Math.pow(speedExcess, 1.65) * (.08 + speedSensitivity * .54));
       brush.sensorPressure = contactPressure * (1 - speedLift);
-      // A deliberate one-second settling makes the start of every stroke soft.
-      const entry = Math.max(0, Math.min(1, (now - brush.startedAt) / 1000));
+      // A deliberate settling makes the start of every stroke soft: one second, or
+      // ENTRY_DISTANCE of travel if that comes first.  Time alone made the entry
+      // stretch with speed (375 px/s spends 375 px getting to full width), which
+      // read as a long, drawn-out start on anything but a very slow stroke.
+      const entry = Math.max(0, Math.min(1,
+        Math.max((now - brush.startedAt) / 1000, brush.travel / ENTRY_DISTANCE)));
       brush.pressure = brush.sensorPressure * entry;
       brush.rootZ = rootHeightForPressure(brush.pressure);
     }
@@ -921,6 +1018,7 @@
       const distance = Math.hypot(dx, dy);
       const elapsed = Math.max(1, sample.timeStamp - brush.inputTime);
       const speed = distance / elapsed; // CSS pixels per millisecond
+      brush.travel += distance;
       const inputPressure = pressureFromContact(sample, size);
       setBrushHeight(inputPressure, speed);
       if (showContact) reportContact(sample, size, inputPressure);
@@ -983,7 +1081,7 @@
       brush.x = e.clientX; brush.y = e.clientY; brush.nativePressureSeen = false;
       brush.inputX = e.clientX; brush.inputY = e.clientY; brush.inputTime = e.timeStamp;
       brush.dirX = 0; brush.dirY = -1; brush.hasDirection = false;
-      brush.startedAt = performance.now(); brush.releasing = false;
+      brush.startedAt = performance.now(); brush.releasing = false; brush.travel = 0;
       brush.lastMoveX = 0; brush.lastMoveY = 1;
       brush.turnStrength = 0;
       brush.inkTaper = 1;
@@ -1016,6 +1114,7 @@
           brush.active = false;
           calculateFinalStroke(brushSettings.haraiDuration);
         } else {
+          if (e.type === 'pointerup' && brush.drawEnabled) settleInk();
           brush.active = false; brush.drawEnabled = false;
           if (e.type === 'pointercancel' && brushSettings.finalRecompute && snapshotValid) {
             drawLayerToCanvas();
